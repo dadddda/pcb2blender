@@ -1,0 +1,87 @@
+[pcb]
+silkscreen_quality = 0.8
+
+[pcb.base]
+material = "pcb"
+color = "pcb_yellow"
+finish = "default"
+bevel = true
+texture_strength = 0.5
+scratches = 0.5
+
+[pcb.surface_finish]
+preset = "ENIG"
+
+[pcb.solder_mask]
+preset = "BLACK"
+texture_strength = 1.0
+
+[pcb.silkscreen]
+preset = "WHITE"
+texture_strength = 1.0
+
+[pcb.board_edge]
+base_color = "#a4a858"
+mix = 0.95
+roughness = 0.6
+texture_strength = 0.5
+
+[pcb.solder]
+color = "#aaaaa6"
+roughness = 0.25
+texture_strength = 1.0
+
+[profiles.resistor_top]
+material = "plastic"
+color = "jet_black"
+finish = "semi_matte"
+bevel = true
+texture_strength = 0.18
+scratches = 0.04
+
+[profiles.resistor_side]
+material = "plastic"
+color = "pure_white"
+finish = "semi_matte"
+bevel = true
+texture_strength = 0.12
+scratches = 0.02
+
+[profiles.ceramic_holder]
+material = "plastic"
+color = "sand_yellow"
+finish = "semi_matte"
+bevel = true
+texture_strength = 0.15
+scratches = 0.04
+
+[profiles.tin_connection]
+material = "metal"
+color = "tin"
+finish = "semi_matte"
+bevel = true
+texture_strength = 0.12
+scratches = 0.08
+
+# Repeated resistor instances share these model-level rules.
+[components."R_0402_1005Metric".materials]
+SHAPE_1 = "resistor_side"
+SHAPE_8 = "tin_connection"
+SHAPE_14 = "resistor_top"
+
+[components."R_0805_2012Metric".materials]
+SHAPE_1 = "resistor_side"
+SHAPE_8 = "tin_connection"
+SHAPE_14 = "resistor_top"
+
+# Ceramic body and tin terminations for 0402 capacitors.
+[components."C_0402_1005Metric".materials]
+SHAPE_1 = "tin_connection"
+SHAPE_11 = "ceramic_holder"
+
+[materials]
+"IC-BODY-EPOXY-04" = "plastic-traffic_black-matte"
+"IC-LABEL-01" = "plastic-grey_white-semi_matte"
+"RES-SMD-01" = "plastic-iron_grey-semi_matte"
+"CAP-CERAMIC-05" = "plastic-signal_grey-semi_matte"
+"LED-RED" = "plastic_transparent-orient_red-diffused"

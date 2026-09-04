@@ -7,6 +7,12 @@ import pytest
 
 import bpy
 
+from bl_ext.user_default.pcb3d_importer.importer import (
+    resolve_hole_shape,
+    resolve_material_map_path,
+)
+from bl_ext.user_default.pcb3d_importer.pcb3d import DrillShape
+
 TEST_FILEPATHS = list((Path(__file__).parent / "test_pcbs").resolve().glob("**/*.pcb3d"))
 
 KWARGS_TEST_PERMUTATIONS = {
@@ -94,3 +100,63 @@ def test_load_file(capsys: pytest.CaptureFixture[str]):
 def has_undefined_nodes():
     node_groups = (group for group in bpy.data.node_groups if group.type == "SHADER")
     return "NodeUndefined" in (node.bl_idname for group in node_groups for node in group.nodes)
+
+
+def test_resolve_unknown_hole_shape_from_dimensions():
+    assert resolve_hole_shape(DrillShape.UNKNOWN, (0.6, 0.6)) == "CIRCULAR"
+    assert resolve_hole_shape(DrillShape.UNKNOWN, (0.6, 1.2)) == "OVAL"
+
+
+def test_resolve_material_map_selection(tmp_path: Path):
+    pcb_path = tmp_path / "board.pcb3d"
+    automatic_path = tmp_path / "board.materials.toml"
+    automatic_path.touch()
+
+    assert resolve_material_map_path(pcb_path, "AUTO", "", "") == automatic_path
+    assert resolve_material_map_path(pcb_path, "FILE", "theme.toml", "") == tmp_path / "theme.toml"
+    assert resolve_material_map_path(pcb_path, "MANUAL", "", "custom.toml") == tmp_path / "custom.toml"
+    assert resolve_material_map_path(pcb_path, "NONE", "", "custom.toml") is None
+
+
+def test_importer_applies_pcb_theme(tmp_path: Path):
+    material_map_path = tmp_path / "materials.toml"
+    material_map_path.write_text(
+        """
+[pcb]
+silkscreen_quality = 0.9
+
+[pcb.solder_mask]
+preset = "CUSTOM"
+light_color = "#123456"
+dark_color = "#091a2b"
+roughness = 0.6
+texture_strength = 0.4
+
+[pcb.silkscreen]
+preset = "BLACK"
+texture_strength = 0.3
+""",
+        encoding="utf-8",
+    )
+    bpy.ops.wm.read_homefile(use_empty=True)
+
+    result = pcb2blender_import_pcb3d(
+        filepath=str(TEST_FILEPATHS[0]), material_map_path=str(material_map_path)
+    )
+
+    assert result == {"FINISHED"}
+    material = next(
+        material
+        for material in bpy.data.materials
+        if material.node_tree and "solder_mask" in material.node_tree.nodes
+    )
+    assert material.node_tree
+    mask = material.node_tree.nodes["solder_mask"]
+    silkscreen = material.node_tree.nodes["silkscreen"]
+    shader = material.node_tree.nodes["shader"]
+    assert mask.soldermask == "CUSTOM"
+    assert mask.inputs["Roughness"].default_value == pytest.approx(0.6)
+    assert mask.inputs["Texture Strength"].default_value == pytest.approx(0.4)
+    assert silkscreen.silkscreen == "BLACK"
+    assert silkscreen.inputs["Texture Strength"].default_value == pytest.approx(0.3)
+    assert shader.inputs["Silkscreen Quality"].default_value == pytest.approx(0.9)

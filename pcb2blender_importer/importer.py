@@ -27,7 +27,10 @@ from .io_scene_x3d.source import ImportX3D, X3D_PT_import_transform, import_x3d
 from .materials import (
     LAYER_BOARD_EDGE,
     LAYER_THROUGH_HOLES,
+    MaterialMap,
+    enhance_component_materials,
     enhance_materials,
+    load_material_map,
     merge_materials,
     setup_pcb_material,
 )
@@ -51,6 +54,41 @@ ENABLE_PROFILER = False
 
 def has_debugger_attached():
     return sys.gettrace() is not None
+
+
+_material_map_file_items: list[tuple[str, str, str, int, int]] = []
+
+
+def material_map_file_items(self: Any, context: bpy.types.Context):
+    _material_map_file_items.clear()
+    if isinstance(context.space_data, bpy.types.SpaceFileBrowser) and context.space_data.params:
+        directory = Path(context.space_data.params.directory.decode("utf-8"))
+        _material_map_file_items.extend(
+            (path.name, path.name, str(path), 0, index)
+            for index, path in enumerate(sorted(directory.glob("*.toml")), start=1)
+        )
+    if not _material_map_file_items:
+        _material_map_file_items.append(
+            ("NONE", "No TOML files found", "No TOML files exist beside the PCB", 0, 1)
+        )
+    return _material_map_file_items
+
+
+def resolve_material_map_path(
+    pcb_path: Path, selection: str, selected_file: str, manual_path: str
+) -> Path | None:
+    if selection == "NONE":
+        return None
+    if selection == "FILE":
+        return pcb_path.parent / selected_file if selected_file and selected_file != "NONE" else None
+    if selection == "MANUAL":
+        path = Path(manual_path) if manual_path else None
+    else:
+        automatic_path = pcb_path.with_suffix(".materials.toml")
+        path = automatic_path if automatic_path.is_file() else Path(manual_path) if manual_path else None
+    if path is not None and not path.is_absolute():
+        path = pcb_path.parent / path
+    return path
 
 
 class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
@@ -82,6 +120,25 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
 
     merge_materials: BoolProperty(name="Merge Materials", default=True)
     enhance_materials: BoolProperty(name="Enhance Materials", default=True)
+    material_map_selection: EnumProperty(
+        name="Material Map",
+        items=(
+            ("AUTO", "Auto", "Use <pcb filename>.materials.toml when present"),
+            ("NONE", "None", "Do not load a material map"),
+            ("FILE", "Choose Adjacent File", "Choose a TOML file beside the PCB"),
+            ("MANUAL", "Manual Path", "Enter a material map path manually"),
+        ),
+        default="AUTO",
+    )
+    material_map_file: EnumProperty(
+        name="TOML File",
+        items=material_map_file_items,
+        description="TOML material map beside the selected PCB",
+    )
+    material_map_path: StringProperty(
+        name="Manual Path",
+        description="Optional TOML file overriding component material assignments",
+    )
     pcb_material: EnumProperty(
         name="PCB Material",
         default="RASTERIZED",
@@ -112,6 +169,7 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
         self.board_objects: dict[str, Object[Mesh]] = {}
         self.component_cache: dict[str, Mesh] = {}
         self.new_materials = set()
+        self.material_map = MaterialMap()
 
     def execute(self, context: bpy.types.Context) -> set[OperatorReturnItems]:
         assert context.view_layer and context.scene
@@ -129,6 +187,19 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
         # import boards
 
         filepath = Path(self.filepath)
+        self.material_map = MaterialMap()
+        material_map_path = resolve_material_map_path(
+            filepath,
+            self.material_map_selection,
+            self.material_map_file,
+            self.material_map_path,
+        )
+        if self.enhance_materials and material_map_path:
+            try:
+                self.material_map = load_material_map(material_map_path)
+            except ValueError as error:
+                return self.error(str(error))
+
         if not isinstance(result := self.import_pcb3d(context, filepath), PCB3D):
             return result
         pcb = result
@@ -199,13 +270,22 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
         if self.merge_materials:
             merge_materials(self.component_cache.values())
 
+        configured_materials = (
+            enhance_component_materials(self.component_cache.values(), self.material_map)
+            if self.enhance_materials
+            else set()
+        )
+
         for material in self.new_materials.copy():
             if not material.users:
                 self.new_materials.remove(material)
                 bpy.data.materials.remove(material)
 
         if self.enhance_materials:
-            enhance_materials(self.new_materials)
+            enhance_materials(
+                self.new_materials.difference(configured_materials),
+                self.material_map.materials,
+            )
 
         if profiler:
             profiler.disable()
@@ -319,7 +399,9 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
             assert (board_material := pcb_object.data.materials[0]) and board_material.node_tree
             self.new_materials.discard(board_material)
             board_material.name = f"PCB_{filepath.stem}"
-            setup_pcb_material(board_material.node_tree, images, pcb.stackup)
+            setup_pcb_material(
+                board_material.node_tree, images, pcb.stackup, self.material_map.pcb
+            )
             if self.import_components and self.add_solder_joints != "NONE":
                 for node_name in ("paste", "seperate_paste", "solder"):
                     board_material.node_tree.nodes[node_name].mute = True
@@ -509,22 +591,24 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
 
                 if pad.pad_type not in {PadType.THT, PadType.SMD}:
                     continue
-                if pad.shape == PadShape.UNKNOWN or pad.drill_shape == DrillShape.UNKNOWN:
+                if pad.shape == PadShape.UNKNOWN:
                     continue
                 if pad.fab_type not in {PadFabType.NONE, PadFabType.BGA, PadFabType.CASTELLATED}:
                     continue
 
                 pad_type = pad.pad_type.name
                 pad_size = pad.size
-                hole_shape = pad.drill_shape.name
                 hole_size = pad.drill_size
+                hole_shape = resolve_hole_shape(pad.drill_shape, hole_size)
+                pad_shape = "RECTANGULAR"
                 match pad.shape:
                     case PadShape.RECT:
                         roundness = 0.0
                     case PadShape.CIRCLE:
-                        pad_size = (pad.size[0], pad.size[0])
+                        pad_shape = "CIRCULAR"
                         roundness = 1.0
                     case PadShape.OVAL:
+                        pad_shape = "OVAL"
                         roundness = 1.0
                     case PadShape.ROUNDRECT:
                         roundness = pad.roundness * 2.0
@@ -535,11 +619,11 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
                         )
                         continue
 
-                cache_id = (pad_type, pad_size, hole_shape, hole_size, roundness)
+                cache_id = (pad_type, pad_shape, pad_size, hole_shape, hole_size, roundness)
                 if not (solder_joint := solder_joint_cache.get(cache_id)):
                     bpy.ops.pcb2blender.solder_joint_add(  # pyright: ignore[reportAttributeAccessIssue]
                         pad_type=pad_type,
-                        pad_shape="RECTANGULAR",
+                        pad_shape=pad_shape,
                         pad_size=pad_size,
                         roundness=roundness,
                         hole_shape=hole_shape,
@@ -836,6 +920,11 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
         layout.prop(self, "enhance_materials")
         col = layout.column()
         col.enabled = self.enhance_materials
+        col.prop(self, "material_map_selection")
+        if self.material_map_selection == "FILE":
+            col.prop(self, "material_map_file")
+        elif self.material_map_selection == "MANUAL":
+            col.prop(self, "material_map_path")
         col.label(text="PCB Material")
         col.prop(self, "pcb_material", text="")
         if self.pcb_material == "RASTERIZED":
@@ -898,6 +987,14 @@ FIX_X3D_SCALE = 2.54 * MM_TO_M
 MATRIX_FIX_SCALE_INV = Matrix.Scale(FIX_X3D_SCALE, 4).inverted()
 
 ANGLE_LIMIT = radians(0.1)
+
+
+def resolve_hole_shape(
+    drill_shape: DrillShape, hole_size: tuple[float, float]
+) -> Literal["CIRCULAR", "OVAL"]:
+    if drill_shape == DrillShape.UNKNOWN:
+        return "CIRCULAR" if np.isclose(hole_size[0], hole_size[1]) else "OVAL"
+    return cast(Literal["CIRCULAR", "OVAL"], drill_shape.name)
 
 
 def match2matrix(match: re.Match[str]):

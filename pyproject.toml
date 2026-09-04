@@ -1,6 +1,6 @@
 [project]
 name = "pcb2blender"
-version = "2.17.5"
+version = "2.18.0"
 readme = "README.md"
 dependencies = ["error-helper==1.4", "pillow==11.3", "skia-python==138"]
 requires-python = "==3.13.*"

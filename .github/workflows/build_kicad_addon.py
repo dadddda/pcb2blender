@@ -18,23 +18,29 @@ def build_kicad_addon(
     output_path: Path = Path(),
     icon: Path | None = None,
     extra_files: list[Path] = [],
+    package_only: bool = False,
 ):
     metadata: dict[str, Any] = json.loads((path / "metadata.json").read_text())
 
     version_str = metadata["versions"][0]["version"].replace(".", "-")
     kicad_version_str = metadata["versions"][0]["kicad_version"].replace(".", "-")
+    output_path.mkdir(parents=True, exist_ok=True)
     zip_file_path = output_path / f"{path.name}_v{version_str}_k{kicad_version_str}.zip"
     with ZipFile(zip_file_path, mode="w", compression=ZIP_DEFLATED) as zip_file:
         plugin_dir = Path("plugins")
 
         extra_paths = (path / extra_file for extra_file in extra_files)
         for filepath in chain(path.glob("**/*.py"), extra_paths):
-            zip_file.write(filepath, str(plugin_dir / filepath.relative_to(path)))
+            source_path = resolve_link_file(filepath)
+            zip_file.write(source_path, (plugin_dir / filepath.relative_to(path)).as_posix())
 
         if icon:
             zip_file.write(path / icon, "resources/icon.png")
 
         zip_file.writestr("metadata.json", json.dumps(metadata, indent=4))
+
+    if package_only:
+        return zip_file_path
 
     hash_file_path = Path(f"{zip_file_path.name}.sha256")
     with open(zip_file_path, "rb") as file:
@@ -73,6 +79,24 @@ def build_kicad_addon(
     content_library_metadata_json = json.dumps(content_library_metadata, indent=4)
     (output_path / "metadata.json").write_text(content_library_metadata_json)
 
+    return zip_file_path
+
+
+def resolve_link_file(path: Path):
+    if path.is_symlink():
+        return path.resolve()
+
+    try:
+        link_target = path.read_text().strip()
+    except UnicodeDecodeError:
+        return path
+
+    if "\n" not in link_target and link_target.startswith("../"):
+        resolved = (path.parent / link_target).resolve()
+        if resolved.is_file():
+            return resolved
+    return path
+
 
 def get_repo_url(path: Path):
     command = ("gh", "repo", "view", "--json", "url", "--template", "{{.url}}")
@@ -87,7 +111,7 @@ def get_repo_tags(path: Path):
 
 if __name__ == "__main__":
     parser = ArgumentParser()
-    parser.add_argument("release_tag")
+    parser.add_argument("release_tag", nargs="?", default="")
     parser.add_argument("--source", default="", help="addon source directory")
     parser.add_argument("--out", default="", help="output directory")
     parser.add_argument("--icon", default="", help="path to addon icon (relative to SOURCE)")
@@ -97,7 +121,15 @@ if __name__ == "__main__":
         default=[],
         help="path to extra addon files (relative to SOURCE)",
     )
+    parser.add_argument(
+        "--package-only",
+        action="store_true",
+        help="build the installable package without generating GitHub release metadata",
+    )
     args = parser.parse_args()
+
+    if not args.package_only and not args.release_tag:
+        parser.error("release_tag is required unless --package-only is used")
 
     build_kicad_addon(
         args.release_tag,
@@ -105,4 +137,5 @@ if __name__ == "__main__":
         Path(args.out),
         Path(args.icon),
         [Path(extra_file) for extra_file in args.extra_files],
+        args.package_only,
     )

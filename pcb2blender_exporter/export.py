@@ -64,6 +64,10 @@ def export_pcb3d(filepath: Union[str, Path], boarddefs: dict[str, Board]):
             name = sanitized(f"{value}_{reference}_{i}_{j}")
             is_flipped: bool = pad.IsFlipped()
             has_paste: bool = pad.IsOnLayer(pcbnew.B_Paste if is_flipped else pcbnew.F_Paste)
+            drill_size = ToMM2D(pad.GetDrillSize())
+            drill_shape = (
+                DrillShape.CIRCULAR if drill_size[0] == drill_size[1] else DrillShape.OVAL
+            )
             pads[name] = Pad(
                 ToMM2D(pad.GetPosition()),
                 is_flipped,
@@ -75,8 +79,8 @@ def export_pcb3d(filepath: Union[str, Path], boarddefs: dict[str, Board]):
                 ToMM2D(pad.GetSize()),
                 pad.GetOrientation().AsRadians(),
                 pad.GetRoundRectRadiusRatio(),
-                DrillShape(pad.GetDrillShape()),
-                ToMM2D(pad.GetDrillSize()),
+                drill_shape,
+                drill_size,
                 PadFabType(pad.GetProperty()),
             )
 

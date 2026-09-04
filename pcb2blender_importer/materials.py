@@ -1,4 +1,8 @@
-from typing import Any, Iterable, Literal, cast, overload
+import re
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterable, Literal, Mapping, cast, overload
 
 import bpy
 from bl_ui import node_add_menu
@@ -41,6 +45,404 @@ KICAD_2_MAT4CAD = {
 }
 
 
+@dataclass(frozen=True)
+class MaterialProfile:
+    material_name: str
+    bevel: bool = True
+    texture_strength: float = 0.5
+    scratches: float = 0.5
+
+
+@dataclass(frozen=True)
+class PcbLayerStyle:
+    preset: str | None = None
+    color: tuple[float, float, float] | None = None
+    roughness: float | None = None
+    texture_strength: float | None = None
+
+
+@dataclass(frozen=True)
+class PcbSolderMaskStyle:
+    preset: str | None = None
+    light_color: tuple[float, float, float] | None = None
+    dark_color: tuple[float, float, float] | None = None
+    roughness: float | None = None
+    texture_strength: float | None = None
+
+
+@dataclass(frozen=True)
+class PcbBoardEdgeStyle:
+    base_color: tuple[float, float, float] | None = None
+    mix: float | None = None
+    roughness: float | None = None
+    texture_strength: float | None = None
+
+
+@dataclass(frozen=True)
+class PcbTheme:
+    base: MaterialProfile | None = None
+    surface_finish: PcbLayerStyle | None = None
+    solder_mask: PcbSolderMaskStyle | None = None
+    silkscreen: PcbLayerStyle | None = None
+    board_edge: PcbBoardEdgeStyle | None = None
+    solder: PcbLayerStyle | None = None
+    silkscreen_quality: float | None = None
+
+
+@dataclass
+class MaterialMap:
+    materials: dict[str, MaterialProfile] = field(default_factory=dict)
+    components: dict[str, dict[str, MaterialProfile]] = field(default_factory=dict)
+    pcb: PcbTheme | None = None
+
+
+def parse_color(section: str, key: str, value: Any) -> tuple[float, float, float]:
+    if not isinstance(value, str) or not re.fullmatch(r"#?[0-9a-fA-F]{6}", value):
+        raise ValueError(f'pcb.{section}.{key} must be a six-digit hex color')
+    return hex2rgb(value.removeprefix("#"))
+
+
+def parse_unit_value(section: str, key: str, value: Any) -> float:
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= value <= 1:
+        path = f"pcb.{section}.{key}" if section else f"pcb.{key}"
+        raise ValueError(f"{path} must be between 0 and 1")
+    return float(value)
+
+
+def parse_layer_style(
+    section: str, data: Any, presets: set[str] | None = None
+) -> PcbLayerStyle:
+    if not isinstance(data, dict):
+        raise ValueError(f"pcb.{section} must be a TOML table")
+    allowed = {"color", "roughness", "texture_strength"}
+    if presets is not None:
+        allowed.add("preset")
+    if unknown := set(data).difference(allowed):
+        raise ValueError(f"unknown pcb.{section} options: {sorted(unknown)}")
+
+    preset = data.get("preset")
+    if preset is not None:
+        if not isinstance(preset, str) or preset.upper() not in presets:
+            raise ValueError(f'unknown pcb.{section} preset "{preset}"')
+        preset = preset.upper()
+    return PcbLayerStyle(
+        preset,
+        parse_color(section, "color", data["color"]) if "color" in data else None,
+        parse_unit_value(section, "roughness", data["roughness"])
+        if "roughness" in data
+        else None,
+        parse_unit_value(section, "texture_strength", data["texture_strength"])
+        if "texture_strength" in data
+        else None,
+    )
+
+
+def parse_pcb_theme(data: Any) -> PcbTheme:
+    if not isinstance(data, dict):
+        raise ValueError("pcb must be a TOML table")
+    allowed = {
+        "base",
+        "surface_finish",
+        "solder_mask",
+        "silkscreen",
+        "board_edge",
+        "solder",
+        "silkscreen_quality",
+    }
+    if unknown := set(data).difference(allowed):
+        raise ValueError(f"unknown pcb options: {sorted(unknown)}")
+
+    base = parse_material_profile("pcb.base", data["base"]) if "base" in data else None
+    surface_finish = (
+        parse_layer_style(
+            "surface_finish", data["surface_finish"], {"HASL", "ENIG", "NONE", "CUSTOM"}
+        )
+        if "surface_finish" in data
+        else None
+    )
+    silkscreen = (
+        parse_layer_style("silkscreen", data["silkscreen"], {"WHITE", "BLACK", "CUSTOM"})
+        if "silkscreen" in data
+        else None
+    )
+    solder = parse_layer_style("solder", data["solder"]) if "solder" in data else None
+
+    solder_mask = None
+    if "solder_mask" in data:
+        section = "solder_mask"
+        style = data[section]
+        if not isinstance(style, dict):
+            raise ValueError(f"pcb.{section} must be a TOML table")
+        allowed_mask = {"preset", "light_color", "dark_color", "roughness", "texture_strength"}
+        if unknown := set(style).difference(allowed_mask):
+            raise ValueError(f"unknown pcb.{section} options: {sorted(unknown)}")
+        preset = style.get("preset")
+        mask_presets = {"GREEN", "RED", "YELLOW", "BLUE", "PURPLE", "WHITE", "BLACK", "MATTE_BLACK", "CUSTOM"}
+        if preset is not None:
+            if not isinstance(preset, str) or preset.upper() not in mask_presets:
+                raise ValueError(f'unknown pcb.{section} preset "{preset}"')
+            preset = preset.upper()
+        solder_mask = PcbSolderMaskStyle(
+            preset,
+            parse_color(section, "light_color", style["light_color"])
+            if "light_color" in style
+            else None,
+            parse_color(section, "dark_color", style["dark_color"])
+            if "dark_color" in style
+            else None,
+            parse_unit_value(section, "roughness", style["roughness"])
+            if "roughness" in style
+            else None,
+            parse_unit_value(section, "texture_strength", style["texture_strength"])
+            if "texture_strength" in style
+            else None,
+        )
+
+    board_edge = None
+    if "board_edge" in data:
+        section = "board_edge"
+        style = data[section]
+        if not isinstance(style, dict):
+            raise ValueError(f"pcb.{section} must be a TOML table")
+        allowed_edge = {"base_color", "mix", "roughness", "texture_strength"}
+        if unknown := set(style).difference(allowed_edge):
+            raise ValueError(f"unknown pcb.{section} options: {sorted(unknown)}")
+        board_edge = PcbBoardEdgeStyle(
+            parse_color(section, "base_color", style["base_color"])
+            if "base_color" in style
+            else None,
+            parse_unit_value(section, "mix", style["mix"]) if "mix" in style else None,
+            parse_unit_value(section, "roughness", style["roughness"])
+            if "roughness" in style
+            else None,
+            parse_unit_value(section, "texture_strength", style["texture_strength"])
+            if "texture_strength" in style
+            else None,
+        )
+
+    quality = (
+        parse_unit_value("", "silkscreen_quality", data["silkscreen_quality"])
+        if "silkscreen_quality" in data
+        else None
+    )
+    return PcbTheme(base, surface_finish, solder_mask, silkscreen, board_edge, solder, quality)
+
+
+def parse_material_profile(name: str, data: Any) -> MaterialProfile:
+    if isinstance(data, str):
+        material_name = data
+        bevel = True
+        texture_strength = 0.5
+        scratches = 0.5
+    elif isinstance(data, dict):
+        allowed = {
+            "material",
+            "color",
+            "finish",
+            "custom_color",
+            "bevel",
+            "texture_strength",
+            "scratches",
+        }
+        if unknown := set(data).difference(allowed):
+            raise ValueError(f'unknown options in material profile "{name}": {sorted(unknown)}')
+
+        base = data.get("material")
+        color = data.get("color")
+        finish = data.get("finish")
+        if not all(isinstance(value, str) for value in (base, color, finish)):
+            raise ValueError(
+                f'material profile "{name}" requires string material, color, and finish values'
+            )
+        if color.lower() == "custom":
+            custom_color = data.get("custom_color")
+            if not isinstance(custom_color, str) or not re.fullmatch(
+                r"#?[0-9a-fA-F]{6}", custom_color
+            ):
+                raise ValueError(
+                    f'material profile "{name}" requires a six-digit custom_color'
+                )
+            color = f"custom_{custom_color.removeprefix('#')}"
+        elif "custom_color" in data:
+            raise ValueError(
+                f'material profile "{name}" can only set custom_color when color is custom'
+            )
+
+        material_name = f"{base.lower()}-{color.lower()}-{finish.lower()}"
+        bevel = data.get("bevel", True)
+        texture_strength = data.get("texture_strength", 0.5)
+        scratches = data.get("scratches", 0.5)
+        if not isinstance(bevel, bool):
+            raise ValueError(f'material profile "{name}" bevel must be true or false')
+        for option, value in (
+            ("texture_strength", texture_strength),
+            ("scratches", scratches),
+        ):
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= value <= 1:
+                raise ValueError(f'material profile "{name}" {option} must be between 0 and 1')
+    else:
+        raise ValueError(f'material profile "{name}" must be a string or table')
+
+    if not Mat4CadMaterial.from_name(material_name):
+        raise ValueError(f'unknown Mat4CAD material "{material_name}" in profile "{name}"')
+    return MaterialProfile(material_name, bevel, float(texture_strength), float(scratches))
+
+
+def load_material_map(path: Path) -> MaterialMap:
+    try:
+        with path.open("rb") as file:
+            data = tomllib.load(file)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise ValueError(f'could not load material map "{path}": {error}') from error
+
+    materials_data = data.get("materials", {})
+    profiles_data = data.get("profiles", {})
+    components_data = data.get("components", {})
+    pcb_data = data.get("pcb")
+    if not all(isinstance(value, dict) for value in (materials_data, profiles_data, components_data)):
+        raise ValueError("materials, profiles, and components must be TOML tables")
+    if not materials_data and not profiles_data and not components_data and pcb_data is None:
+        raise ValueError("material map must contain materials, profiles, components, or pcb")
+
+    profiles = {
+        name: parse_material_profile(name, profile)
+        for name, profile in profiles_data.items()
+    }
+    materials = {
+        source_name: parse_material_profile(source_name, profile)
+        for source_name, profile in materials_data.items()
+    }
+    components: dict[str, dict[str, MaterialProfile]] = {}
+    for model_name, component_data in components_data.items():
+        if not isinstance(component_data, dict) or not isinstance(
+            assignments := component_data.get("materials"), dict
+        ):
+            raise ValueError(f'component "{model_name}" must contain a materials table')
+        components[model_name] = {}
+        for slot_name, profile_name in assignments.items():
+            if not isinstance(profile_name, str) or profile_name not in profiles:
+                raise ValueError(
+                    f'component "{model_name}" slot "{slot_name}" references unknown profile '
+                    f'"{profile_name}"'
+                )
+            components[model_name][slot_name] = profiles[profile_name]
+
+    return MaterialMap(
+        materials,
+        components,
+        parse_pcb_theme(pcb_data) if pcb_data is not None else None,
+    )
+
+
+def setup_material(material: bpy.types.Material, profile: MaterialProfile):
+    assert material.node_tree
+    mat4cad_material = Mat4CadMaterial.from_name(profile.material_name)
+    assert mat4cad_material
+    mat4cad_material.setup_node_tree(material.node_tree)
+    node = next(
+        (node for node in material.node_tree.nodes if node.bl_idname == "ShaderNodeBsdfMat4cad"),
+        None,
+    )
+    if node:
+        node.use_bevel = profile.bevel
+        node.inputs["Texture Strength"].default_value = profile.texture_strength
+        node.inputs["Scratches"].default_value = profile.scratches
+
+
+def setup_mat4cad_node(node: Any, profile: MaterialProfile):
+    material = Mat4CadMaterial.from_name(profile.material_name)
+    assert material and material.base and material.color and material.variant
+    node.mat_base = material.base.upper()
+    node.mat_variant = material.variant.upper()
+    if material.has_custom_color:
+        node.mat_color = "CUSTOM"
+        node.inputs["Color"].default_value = (*srgb2lin(material.diffuse), 1.0)
+    else:
+        node.mat_color = material.color.upper()
+    node.use_bevel = profile.bevel
+    node.inputs["Texture Strength"].default_value = profile.texture_strength
+    node.inputs["Scratches"].default_value = profile.scratches
+
+
+def set_color_input(node: Any, name: str, color: tuple[float, float, float] | None):
+    if color is not None:
+        node.inputs[name].default_value = (*srgb2lin(color), 1.0)
+
+
+def set_float_input(node: Any, name: str, value: float | None):
+    if value is not None:
+        node.inputs[name].default_value = value
+
+
+def apply_pcb_theme(node_tree: bpy.types.ShaderNodeTree, theme: PcbTheme | None):
+    if theme is None:
+        return
+
+    if theme.base:
+        setup_mat4cad_node(node_tree.nodes["base_material"], theme.base)
+
+    if style := theme.surface_finish:
+        node = node_tree.nodes["exposed_copper"]
+        if style.preset:
+            node.surface_finish = style.preset
+        set_color_input(node, "Color", style.color)
+        set_float_input(node, "Roughness", style.roughness)
+        set_float_input(node, "Texture Strength", style.texture_strength)
+
+    if style := theme.solder_mask:
+        node = node_tree.nodes["solder_mask"]
+        if style.preset:
+            node.soldermask = style.preset
+        set_color_input(node, "Light Color", style.light_color)
+        set_color_input(node, "Dark Color", style.dark_color)
+        set_float_input(node, "Roughness", style.roughness)
+        set_float_input(node, "Texture Strength", style.texture_strength)
+
+    if style := theme.silkscreen:
+        node = node_tree.nodes["silkscreen"]
+        if style.preset:
+            node.silkscreen = style.preset
+        set_color_input(node, "Color", style.color)
+        set_float_input(node, "Roughness", style.roughness)
+        set_float_input(node, "Texture Strength", style.texture_strength)
+
+    if style := theme.board_edge:
+        node = node_tree.nodes["board_edge"]
+        set_color_input(node, "Base Color", style.base_color)
+        set_float_input(node, "Mix", style.mix)
+        set_float_input(node, "Roughness", style.roughness)
+        set_float_input(node, "Texture Strength", style.texture_strength)
+
+    if style := theme.solder:
+        node = node_tree.nodes["solder"]
+        set_color_input(node, "Color", style.color)
+        set_float_input(node, "Roughness", style.roughness)
+        set_float_input(node, "Texture Strength", style.texture_strength)
+
+    if theme.silkscreen_quality is not None:
+        node_tree.nodes["shader"].inputs["Silkscreen Quality"].default_value = (
+            theme.silkscreen_quality
+        )
+
+
+def enhance_component_materials(
+    meshes: Iterable[bpy.types.Mesh], material_map: MaterialMap
+) -> set[bpy.types.Material]:
+    configured_materials: set[bpy.types.Material] = set()
+    for mesh in meshes:
+        assignments = material_map.components.get(remove_blender_name_suffix(mesh.name))
+        if not assignments:
+            continue
+        for index, material in enumerate(mesh.materials):
+            if not material or not (profile := assignments.get(remove_blender_name_suffix(material.name))):
+                continue
+            configured_material = material.copy()
+            mesh.materials[index] = configured_material
+            setup_material(configured_material, profile)
+            configured_materials.add(configured_material)
+    return configured_materials
+
+
 def merge_materials(meshes: Iterable[bpy.types.Mesh]):
     merged_materials = {}
     for mesh in meshes:
@@ -54,14 +456,21 @@ def merge_materials(meshes: Iterable[bpy.types.Mesh]):
                 merged_materials[(name, color)] = material
 
 
-def enhance_materials(materials: Iterable[bpy.types.Material]):
+def enhance_materials(
+    materials: Iterable[bpy.types.Material],
+    material_map: Mapping[str, MaterialProfile] | None = None,
+):
+    material_map = material_map or {}
     for material in materials:
         if bpy.app.version < (5, 0, 0) and not material.use_nodes:
             continue
         assert (node_tree := material.node_tree)
 
         material_name = remove_blender_name_suffix(material.name)
-        if mat4cad_mat := Mat4CadMaterial.from_name(material_name):
+        if profile := material_map.get(material_name):
+            setup_material(material, profile)
+            continue
+        elif mat4cad_mat := Mat4CadMaterial.from_name(material_name):
             pass
         elif mat4cad_mat := Mat4CadMaterial.from_name(KICAD_2_MAT4CAD.get(material_name, "")):
             pass
@@ -99,7 +508,10 @@ def remove_blender_name_suffix(name: str):
 
 
 def setup_pcb_material(
-    node_tree: bpy.types.ShaderNodeTree, images: dict[str, bpy.types.Image], stackup: Any
+    node_tree: bpy.types.ShaderNodeTree,
+    images: dict[str, bpy.types.Image],
+    stackup: Any,
+    theme: PcbTheme | None = None,
 ):
     node_tree.nodes.clear()
 
@@ -236,6 +648,7 @@ def setup_pcb_material(
     }
 
     setup_node_tree(node_tree, nodes, label_nodes=False)
+    apply_pcb_theme(node_tree, theme)
 
 
 class ShaderNodeBsdfPcbSurfaceFinish(SharedCustomNodetreeNodeBase):

@@ -14,6 +14,13 @@ else:
     OperatorReturnItems = str
 
 
+THT_PAD_EDGE_EXPANSION_MM = 0.1
+THT_JOINT_HEIGHT_MM = 1.8
+THT_SLOT_JOINT_HEIGHT_MM = 0.3
+THT_COMPONENT_SIDE_HEIGHT_MM = 0.25
+SMD_JOINT_HEIGHT_MM = 0.18
+
+
 class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
     """Add a solder joint"""
 
@@ -28,7 +35,12 @@ class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
     )
     pad_shape: EnumProperty(
         name="Pad Shape",
-        items=(("SQUARE", "Square", ""), ("RECTANGULAR", "Rectangular", "")),
+        items=(
+            ("SQUARE", "Square", ""),
+            ("RECTANGULAR", "Rectangular", ""),
+            ("CIRCULAR", "Circular", ""),
+            ("OVAL", "Oval / Oblong", ""),
+        ),
         description="Shape of the pad",
     )
     pad_size: FloatVectorProperty(
@@ -82,9 +94,15 @@ class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
 
         context.collection.objects.link(obj)
 
-        if self.pad_shape == "SQUARE":
+        if self.pad_shape in {"SQUARE", "CIRCULAR"}:
             self.pad_size[1] = self.pad_size[0]
-        pad_size = np.array(self.pad_size) * 1.04
+        if self.pad_shape in {"CIRCULAR", "OVAL"}:
+            self.roundness = 1.0
+        pad_size = np.array(self.pad_size)
+        if self.pad_type == "THT":
+            pad_size += THT_PAD_EDGE_EXPANSION_MM * 2.0
+        else:
+            pad_size *= 1.04
         if self.hole_shape == "CIRCULAR":
             self.hole_size[1] = self.hole_size[0]
         hole_size = np.array(self.hole_size)
@@ -155,7 +173,7 @@ class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
         displace = obj.modifiers.new("Noise", "DISPLACE")
         displace.texture = texture
         displace.texture_coords = "GLOBAL"
-        displace.strength = 5e-5 if self.pad_type == "SMD" else 1e-4
+        displace.strength = 3e-5 if self.pad_type == "SMD" else 2.5e-5
 
         return {"FINISHED"}
 
@@ -167,8 +185,13 @@ class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
         layout.separator()
 
         layout.prop(self, "pad_shape")
-        layout.prop(self, "pad_size", index=0 if self.pad_shape == "SQUARE" else -1)
-        layout.prop(self, "roundness", slider=True)
+        layout.prop(
+            self,
+            "pad_size",
+            index=0 if self.pad_shape in {"SQUARE", "CIRCULAR"} else -1,
+        )
+        if self.pad_shape not in {"CIRCULAR", "OVAL"}:
+            layout.prop(self, "roundness", slider=True)
         layout.separator()
 
         if self.pad_type == "THT":
@@ -193,16 +216,34 @@ def solder_joint_tht(
     fs = np.empty((0, 4), dtype=int)
 
     avg_size = (pad_size + hole_size) * 0.5
+    is_slotted = not np.isclose(hole_size[0], hole_size[1])
+    joint_height = THT_SLOT_JOINT_HEIGHT_MM if is_slotted else THT_JOINT_HEIGHT_MM
+    segments_per_corner = 8 if roundness >= 1.0 or is_slotted else 2
 
-    vs, fs = add_octagon_layer(vs, fs, hole_size * 1.4, -(pcb_thickness + 0.1), 1.0, True)
-    vs, fs = add_octagon_layer(vs, fs, hole_size * 0.9, -0.30, 1.0)
-    vs, fs = add_octagon_layer(vs, fs, pad_size, -0.10, max(roundness, 0.2))
-    vs, fs = add_octagon_layer(vs, fs, pad_size, 0.05, max(roundness, 0.2))
-    vs, fs = add_octagon_layer(vs, fs, avg_size * 0.9, 0.25, 0.8)
-    vs, fs = add_octagon_layer(vs, fs, hole_size * 0.9, 0.55, 0.7)
-    vs, fs = add_octagon_layer(vs, fs, hole_size * 0.8, 0.85, 0.2)
-    vs, fs = add_octagon_layer(vs, fs, hole_size * 0.5, 1.15, 0.6)
-    vs, fs = add_octagon_layer(vs, fs, hole_size * 0.2, 1.20, 1.0, True)
+    layers = (
+        (
+            hole_size * 0.3,
+            -(pcb_thickness + THT_COMPONENT_SIDE_HEIGHT_MM),
+            1.0,
+            True,
+        ),
+        (hole_size * 0.7, -(pcb_thickness + 0.18), 0.6, False),
+        (avg_size * 0.95, -(pcb_thickness + 0.10), 0.8, False),
+        (pad_size, -(pcb_thickness + 0.04), max(roundness, 0.2), False),
+        (pad_size, -(pcb_thickness - 0.03), max(roundness, 0.2), False),
+        (hole_size * 0.9, -0.30, 1.0, False),
+        (pad_size, -0.10, max(roundness, 0.2), False),
+        (pad_size, 0.05, max(roundness, 0.2), False),
+        (avg_size * 0.95, joint_height * 0.25, 0.8, False),
+        (hole_size * 1.1, joint_height * 0.50, 0.7, False),
+        (hole_size, joint_height * 0.75, 0.2, False),
+        (hole_size * 0.8, joint_height * 0.90, 0.6, False),
+        (hole_size * 0.3, joint_height, 1.0, True),
+    )
+    for size, z, layer_roundness, fill in layers:
+        vs, fs = add_octagon_layer(
+            vs, fs, size, z, layer_roundness, fill, segments_per_corner
+        )
     vs += np.array((0, 0, pcb_thickness * 0.5))
 
     return vs, fs
@@ -213,9 +254,17 @@ def solder_joint_smd(
 ):
     vs = np.empty((0, 3), dtype=float)
     fs = np.empty((0, 4), dtype=int)
+    segments_per_corner = 4 if roundness >= 1.0 else 2
 
-    vs, fs = add_octagon_layer(vs, fs, pad_size, -0.06, max(roundness, 0.2), True)
-    vs, fs = add_octagon_layer(vs, fs, pad_size, 0.04, max(roundness, 0.2), True)
+    layers = (
+        (pad_size, -0.04, max(roundness, 0.2), True),
+        (pad_size, 0.04, max(roundness, 0.2), False),
+        (pad_size * 0.85, SMD_JOINT_HEIGHT_MM, max(roundness, 0.4), True),
+    )
+    for size, z, layer_roundness, fill in layers:
+        vs, fs = add_octagon_layer(
+            vs, fs, size, z, layer_roundness, fill, segments_per_corner
+        )
     vs += np.array((0, 0, pcb_thickness * 0.5))
 
     return vs, fs
@@ -231,36 +280,59 @@ def add_octagon_layer(
     z: float,
     roundness: float = 0.5,
     fill: bool = False,
+    segments_per_corner: int = 2,
 ):
     half_size = size * 0.5
-    min_half_size = half_size.min()
-    r_offset = min_half_size * roundness * MAX_ROUNDNESS_FAC
-
-    new_verts = np.array(
-        (
-            ((half_size[0] - r_offset), (half_size[1]), z),
-            ((half_size[0]), (half_size[1] - r_offset), z),
-            ((half_size[0]), -(half_size[1] - r_offset), z),
-            ((half_size[0] - r_offset), -(half_size[1]), z),
-            (-(half_size[0] - r_offset), -(half_size[1]), z),
-            (-(half_size[0]), -(half_size[1] - r_offset), z),
-            (-(half_size[0]), (half_size[1] - r_offset), z),
-            (-(half_size[0] - r_offset), (half_size[1]), z),
+    if segments_per_corner == 2:
+        min_half_size = half_size.min()
+        r_offset = min_half_size * roundness * MAX_ROUNDNESS_FAC
+        new_verts = np.array(
+            (
+                ((half_size[0] - r_offset), (half_size[1]), z),
+                ((half_size[0]), (half_size[1] - r_offset), z),
+                ((half_size[0]), -(half_size[1] - r_offset), z),
+                ((half_size[0] - r_offset), -(half_size[1]), z),
+                (-(half_size[0] - r_offset), -(half_size[1]), z),
+                (-(half_size[0]), -(half_size[1] - r_offset), z),
+                (-(half_size[0]), (half_size[1] - r_offset), z),
+                (-(half_size[0] - r_offset), (half_size[1]), z),
+            )
         )
-    )
+    else:
+        radius = half_size.min() * roundness
+        corner_centers = (
+            (half_size[0] - radius, half_size[1] - radius, 90.0),
+            (half_size[0] - radius, -half_size[1] + radius, 0.0),
+            (-half_size[0] + radius, -half_size[1] + radius, -90.0),
+            (-half_size[0] + radius, half_size[1] - radius, -180.0),
+        )
+        new_verts = np.array(
+            [
+                (
+                    center_x + radius * np.cos(angle),
+                    center_y + radius * np.sin(angle),
+                    z,
+                )
+                for center_x, center_y, start_angle in corner_centers
+                for angle in np.deg2rad(
+                    start_angle - np.arange(segments_per_corner) * 90.0 / segments_per_corner
+                )
+            ]
+        )
+
+    segment_count = len(new_verts)
 
     if len(verts) > 0:
         new_faces = np.array(
-            (
-                (-8, -7, 1, 0),
-                (-7, -6, 2, 1),
-                (-6, -5, 3, 2),
-                (-5, -4, 4, 3),
-                (-4, -3, 5, 4),
-                (-3, -2, 6, 5),
-                (-2, -1, 7, 6),
-                (-1, -8, 0, 7),
-            )
+            [
+                (
+                    -segment_count + index,
+                    -segment_count + (index + 1) % segment_count,
+                    (index + 1) % segment_count,
+                    index,
+                )
+                for index in range(segment_count)
+            ]
         )
     else:
         new_faces = np.empty((0, 4), dtype=int)
@@ -269,12 +341,15 @@ def add_octagon_layer(
         center_vertex = (0, 0, z)
         new_verts = np.append((center_vertex,), new_verts, axis=0)
         fill_faces = np.array(
-            (
-                (1, 2, 3, 0),
-                (3, 4, 5, 0),
-                (5, 6, 7, 0),
-                (7, 8, 1, 0),
-            )
+            [
+                (
+                    index + 1,
+                    (index + 1) % segment_count + 1,
+                    (index + 2) % segment_count + 1,
+                    0,
+                )
+                for index in range(0, segment_count, 2)
+            ]
         )
         new_faces = new_faces + (new_faces >= 0)
         new_faces = np.append(new_faces, fill_faces, axis=0)
