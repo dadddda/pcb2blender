@@ -14,11 +14,18 @@ else:
     OperatorReturnItems = str
 
 
-THT_PAD_EDGE_EXPANSION_MM = 0.1
-THT_JOINT_HEIGHT_MM = 1.8
-THT_SLOT_JOINT_HEIGHT_MM = 0.3
-THT_COMPONENT_SIDE_HEIGHT_MM = 0.25
-SMD_JOINT_HEIGHT_MM = 0.18
+THT_PAD_EDGE_EXPANSION_MIN_MM = 0.05
+THT_PAD_EDGE_EXPANSION_MAX_MM = 0.15
+THT_JOINT_HEIGHT_MIN_MM = 0.35
+THT_JOINT_HEIGHT_MAX_MM = 1.8
+THT_SLOT_JOINT_HEIGHT_MIN_MM = 0.16
+THT_SLOT_JOINT_HEIGHT_MAX_MM = 0.3
+THT_COMPONENT_SIDE_HEIGHT_MIN_MM = 0.1
+THT_COMPONENT_SIDE_HEIGHT_MAX_MM = 0.25
+SMD_PAD_EDGE_EXPANSION_MIN_MM = 0.02
+SMD_PAD_EDGE_EXPANSION_MAX_MM = 0.08
+SMD_JOINT_HEIGHT_MIN_MM = 0.12
+SMD_JOINT_HEIGHT_MAX_MM = 0.32
 
 
 class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
@@ -98,14 +105,14 @@ class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
             self.pad_size[1] = self.pad_size[0]
         if self.pad_shape in {"CIRCULAR", "OVAL"}:
             self.roundness = 1.0
-        pad_size = np.array(self.pad_size)
-        if self.pad_type == "THT":
-            pad_size += THT_PAD_EDGE_EXPANSION_MM * 2.0
-        else:
-            pad_size *= 1.04
         if self.hole_shape == "CIRCULAR":
             self.hole_size[1] = self.hole_size[0]
         hole_size = np.array(self.hole_size)
+        pad_size = np.array(self.pad_size)
+        if self.pad_type == "THT":
+            pad_size += tht_pad_edge_expansion(pad_size, hole_size) * 2.0
+        else:
+            pad_size += smd_pad_edge_expansion(pad_size) * 2.0
 
         if self.pad_type == "THT":
             verts, faces = solder_joint_tht(pad_size, hole_size, self.roundness, self.pcb_thickness)
@@ -215,35 +222,34 @@ def solder_joint_tht(
     vs = np.empty((0, 3), dtype=float)
     fs = np.empty((0, 4), dtype=int)
 
-    avg_size = (pad_size + hole_size) * 0.5
     is_slotted = not np.isclose(hole_size[0], hole_size[1])
-    joint_height = THT_SLOT_JOINT_HEIGHT_MM if is_slotted else THT_JOINT_HEIGHT_MM
+    joint_height, component_side_height, pin_size = tht_joint_dimensions(
+        pad_size, hole_size, roundness
+    )
     segments_per_corner = 8 if roundness >= 1.0 or is_slotted else 2
 
+    component_layers = meniscus_layers(
+        pin_size * 0.65,
+        pad_size,
+        -(pcb_thickness + component_side_height),
+        -(pcb_thickness - 0.03),
+        5,
+    )
+    solder_layers = meniscus_layers(pad_size, pin_size, 0.05, joint_height, 7)
     layers = (
-        (
-            hole_size * 0.3,
-            -(pcb_thickness + THT_COMPONENT_SIDE_HEIGHT_MM),
-            1.0,
-            True,
+        *(
+            (size, z, max(roundness, 0.4), index == 0)
+            for index, (size, z) in enumerate(component_layers)
         ),
-        (hole_size * 0.7, -(pcb_thickness + 0.18), 0.6, False),
-        (avg_size * 0.95, -(pcb_thickness + 0.10), 0.8, False),
-        (pad_size, -(pcb_thickness + 0.04), max(roundness, 0.2), False),
-        (pad_size, -(pcb_thickness - 0.03), max(roundness, 0.2), False),
         (hole_size * 0.9, -0.30, 1.0, False),
         (pad_size, -0.10, max(roundness, 0.2), False),
-        (pad_size, 0.05, max(roundness, 0.2), False),
-        (avg_size * 0.95, joint_height * 0.25, 0.8, False),
-        (hole_size * 1.1, joint_height * 0.50, 0.7, False),
-        (hole_size, joint_height * 0.75, 0.2, False),
-        (hole_size * 0.8, joint_height * 0.90, 0.6, False),
-        (hole_size * 0.3, joint_height, 1.0, True),
+        *(
+            (size, z, max(roundness, 0.4), index == len(solder_layers) - 1)
+            for index, (size, z) in enumerate(solder_layers)
+        ),
     )
     for size, z, layer_roundness, fill in layers:
-        vs, fs = add_octagon_layer(
-            vs, fs, size, z, layer_roundness, fill, segments_per_corner
-        )
+        vs, fs = add_octagon_layer(vs, fs, size, z, layer_roundness, fill, segments_per_corner)
     vs += np.array((0, 0, pcb_thickness * 0.5))
 
     return vs, fs
@@ -255,19 +261,107 @@ def solder_joint_smd(
     vs = np.empty((0, 3), dtype=float)
     fs = np.empty((0, 4), dtype=int)
     segments_per_corner = 4 if roundness >= 1.0 else 2
+    joint_height, top_size = smd_joint_dimensions(pad_size, roundness)
 
-    layers = (
-        (pad_size, -0.04, max(roundness, 0.2), True),
-        (pad_size, 0.04, max(roundness, 0.2), False),
-        (pad_size * 0.85, SMD_JOINT_HEIGHT_MM, max(roundness, 0.4), True),
+    profile = meniscus_layers(pad_size, top_size, 0.04, joint_height, 5)
+    layers = ((pad_size, -0.04, max(roundness, 0.2), True),) + tuple(
+        (size, z, max(roundness, 0.4), index == len(profile) - 1)
+        for index, (size, z) in enumerate(profile)
     )
     for size, z, layer_roundness, fill in layers:
-        vs, fs = add_octagon_layer(
-            vs, fs, size, z, layer_roundness, fill, segments_per_corner
-        )
+        vs, fs = add_octagon_layer(vs, fs, size, z, layer_roundness, fill, segments_per_corner)
     vs += np.array((0, 0, pcb_thickness * 0.5))
 
     return vs, fs
+
+
+def rounded_rectangle_area(size: NDArray[np.float64], roundness: float) -> float:
+    radius = size.min() * 0.5 * np.clip(roundness, 0.0, 1.0)
+    return float(np.prod(size) - (4.0 - np.pi) * radius**2)
+
+
+def equivalent_solder_radius(area: float) -> float:
+    return float(np.sqrt(max(area, 0.0) / np.pi))
+
+
+def tht_pad_edge_expansion(pad_size: NDArray[np.float64], hole_size: NDArray[np.float64]) -> float:
+    annular_width = max(float(np.min((pad_size - hole_size) * 0.5)), 0.0)
+    return float(
+        np.clip(
+            annular_width * 0.2,
+            THT_PAD_EDGE_EXPANSION_MIN_MM,
+            THT_PAD_EDGE_EXPANSION_MAX_MM,
+        )
+    )
+
+
+def smd_pad_edge_expansion(pad_size: NDArray[np.float64]) -> float:
+    return float(
+        np.clip(
+            pad_size.min() * 0.04,
+            SMD_PAD_EDGE_EXPANSION_MIN_MM,
+            SMD_PAD_EDGE_EXPANSION_MAX_MM,
+        )
+    )
+
+
+def tht_joint_dimensions(
+    pad_size: NDArray[np.float64], hole_size: NDArray[np.float64], roundness: float
+) -> tuple[float, float, NDArray[np.float64]]:
+    solder_area = max(
+        rounded_rectangle_area(pad_size, roundness) - rounded_rectangle_area(hole_size, 1.0),
+        0.0,
+    )
+    solder_radius = equivalent_solder_radius(solder_area)
+    is_slotted = not np.isclose(hole_size[0], hole_size[1])
+    if is_slotted:
+        joint_height = np.clip(
+            0.12 + solder_radius * 0.2,
+            THT_SLOT_JOINT_HEIGHT_MIN_MM,
+            THT_SLOT_JOINT_HEIGHT_MAX_MM,
+        )
+    else:
+        joint_height = np.clip(
+            0.3 + solder_radius * 0.8,
+            THT_JOINT_HEIGHT_MIN_MM,
+            THT_JOINT_HEIGHT_MAX_MM,
+        )
+    component_side_height = np.clip(
+        0.07 + solder_radius * 0.15,
+        THT_COMPONENT_SIDE_HEIGHT_MIN_MM,
+        THT_COMPONENT_SIDE_HEIGHT_MAX_MM,
+    )
+    pin_size = hole_size * 0.72
+    return float(joint_height), float(component_side_height), pin_size
+
+
+def smd_joint_dimensions(
+    pad_size: NDArray[np.float64], roundness: float
+) -> tuple[float, NDArray[np.float64]]:
+    pad_area = rounded_rectangle_area(pad_size, roundness)
+    linear_size = np.sqrt(max(pad_area, 1e-9))
+    joint_height = np.clip(
+        0.09 + linear_size * 0.15,
+        SMD_JOINT_HEIGHT_MIN_MM,
+        SMD_JOINT_HEIGHT_MAX_MM,
+    )
+    top_scale = np.clip(0.72 + 0.05 * pad_size.min() / linear_size, 0.72, 0.8)
+    return float(joint_height), pad_size * top_scale
+
+
+def meniscus_layers(
+    start_size: NDArray[np.float64],
+    end_size: NDArray[np.float64],
+    start_z: float,
+    end_z: float,
+    count: int,
+) -> tuple[tuple[NDArray[np.float64], float], ...]:
+    layers = []
+    for amount in np.linspace(0.0, 1.0, count):
+        smooth_amount = amount * amount * (3.0 - 2.0 * amount)
+        size = start_size + (end_size - start_size) * smooth_amount
+        layers.append((size, start_z + (end_z - start_z) * amount))
+    return tuple(layers)
 
 
 MAX_ROUNDNESS_FAC = 1 - 1 / np.tan(np.deg2rad(135.0 / 2))

@@ -57,20 +57,27 @@ def has_debugger_attached():
 
 
 _material_map_file_items: list[tuple[str, str, str, int, int]] = []
+_material_map_directory: Path | None = None
 
 
 def material_map_file_items(self: Any, context: bpy.types.Context):
-    _material_map_file_items.clear()
+    global _material_map_directory
+
+    directory = None
     if isinstance(context.space_data, bpy.types.SpaceFileBrowser) and context.space_data.params:
         directory = Path(context.space_data.params.directory.decode("utf-8"))
+    elif filepath := getattr(self, "filepath", ""):
+        directory = Path(filepath).parent
+
+    if directory is not None and directory != _material_map_directory:
+        _material_map_directory = directory
+        _material_map_file_items.clear()
         _material_map_file_items.extend(
             (path.name, path.name, str(path), 0, index)
             for index, path in enumerate(sorted(directory.glob("*.toml")), start=1)
         )
     if not _material_map_file_items:
-        _material_map_file_items.append(
-            ("NONE", "No TOML files found", "No TOML files exist beside the PCB", 0, 1)
-        )
+        return (("NONE", "No TOML files found", "No TOML files exist beside the PCB", 0, 1),)
     return _material_map_file_items
 
 

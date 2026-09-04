@@ -159,6 +159,19 @@ texture_strength = 1.0
 Custom solder masks support `light_color` and `dark_color`; custom silkscreen and surface finishes
 support `color`. Explicit color and scalar values override their selected preset.
 
+## Solder-joint profiles
+
+Generated solder joints use a bounded geometry heuristic rather than one fixed profile:
+
+- THT fillet volume is estimated from pad area minus hole area.
+- Wider annular rings produce broader and taller fillets.
+- Slotted mounting tabs stay shallow, while circular through-hole pins can form taller fillets.
+- SMD bead height and edge spread scale with pad area and minimum pad width.
+- Smoothstep-interpolated layers approximate a surface-tension meniscus without a costly physics solve.
+
+The `.pcb3d` format does not include exact terminal dimensions or paste volume, so this remains a
+visual approximation based on the available pad, hole, shape, and PCB-thickness metadata.
+
 ## Development
 
 Initialize the repository and run the Blender test suite:

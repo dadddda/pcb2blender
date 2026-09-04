@@ -4,14 +4,13 @@ from tempfile import gettempdir
 from typing import Any
 
 import pytest
-
-import bpy
-
 from bl_ext.user_default.pcb3d_importer.importer import (
     resolve_hole_shape,
     resolve_material_map_path,
 )
 from bl_ext.user_default.pcb3d_importer.pcb3d import DrillShape
+
+import bpy
 
 TEST_FILEPATHS = list((Path(__file__).parent / "test_pcbs").resolve().glob("**/*.pcb3d"))
 
@@ -125,6 +124,12 @@ def test_importer_applies_pcb_theme(tmp_path: Path):
 [pcb]
 silkscreen_quality = 0.9
 
+[pcb.surface_finish]
+preset = "CUSTOM"
+color = "#e7cd8c"
+roughness = 0.1
+texture_strength = 0.3
+
 [pcb.solder_mask]
 preset = "CUSTOM"
 light_color = "#123456"
@@ -151,12 +156,57 @@ texture_strength = 0.3
         if material.node_tree and "solder_mask" in material.node_tree.nodes
     )
     assert material.node_tree
+    surface_finish = material.node_tree.nodes["exposed_copper"]
     mask = material.node_tree.nodes["solder_mask"]
     silkscreen = material.node_tree.nodes["silkscreen"]
     shader = material.node_tree.nodes["shader"]
+    assert surface_finish.surface_finish == "CUSTOM"
+    assert surface_finish.inputs["Color"].default_value[:3] == pytest.approx(
+        (0.799103, 0.610496, 0.262251), abs=1e-5
+    )
+    assert surface_finish.inputs["Roughness"].default_value == pytest.approx(0.1)
+    assert surface_finish.inputs["Texture Strength"].default_value == pytest.approx(0.3)
     assert mask.soldermask == "CUSTOM"
     assert mask.inputs["Roughness"].default_value == pytest.approx(0.6)
     assert mask.inputs["Texture Strength"].default_value == pytest.approx(0.4)
     assert silkscreen.silkscreen == "BLACK"
     assert silkscreen.inputs["Texture Strength"].default_value == pytest.approx(0.3)
     assert shader.inputs["Silkscreen Quality"].default_value == pytest.approx(0.9)
+
+
+def test_importer_loads_adjacent_material_map(tmp_path: Path):
+    pcb_path = tmp_path / "board.pcb3d"
+    pcb_path.write_bytes(TEST_FILEPATHS[0].read_bytes())
+    material_map_path = tmp_path / "board-theme.toml"
+    material_map_path.write_text(
+        """
+[pcb.surface_finish]
+preset = "CUSTOM"
+color = "#e7cd8c"
+roughness = 0.15
+texture_strength = 1.0
+""",
+        encoding="utf-8",
+    )
+    bpy.ops.wm.read_homefile(use_empty=True)
+
+    result = pcb2blender_import_pcb3d(
+        filepath=str(pcb_path),
+        material_map_selection="FILE",
+        material_map_file=material_map_path.name,
+    )
+
+    assert result == {"FINISHED"}
+    material = next(
+        material
+        for material in bpy.data.materials
+        if material.node_tree and "exposed_copper" in material.node_tree.nodes
+    )
+    assert material.node_tree
+    surface_finish = material.node_tree.nodes["exposed_copper"]
+    assert surface_finish.surface_finish == "CUSTOM"
+    assert surface_finish.inputs["Color"].default_value[:3] == pytest.approx(
+        (0.799103, 0.610496, 0.262251), abs=1e-5
+    )
+    assert surface_finish.inputs["Roughness"].default_value == pytest.approx(0.15)
+    assert surface_finish.inputs["Texture Strength"].default_value == pytest.approx(1.0)
