@@ -163,11 +163,9 @@ class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
         bpy.ops.object.mode_set(mode="OBJECT")
 
         if self.pad_type == "SMD":
-            smooth = obj.modifiers.new("Simple", "SUBSURF")
-            smooth.subdivision_type = "SIMPLE"
-            smooth.render_levels = 1
             smooth = obj.modifiers.new("Smooth", "SUBSURF")
-            smooth.render_levels = 1
+            smooth.levels = 2
+            smooth.render_levels = 2
         else:
             smooth = obj.modifiers.new("Smooth", "SUBSURF")
             smooth.levels = 2
@@ -260,19 +258,51 @@ def solder_joint_smd(
 ):
     vs = np.empty((0, 3), dtype=float)
     fs = np.empty((0, 4), dtype=int)
-    segments_per_corner = 4 if roundness >= 1.0 else 2
-    joint_height, top_size = smd_joint_dimensions(pad_size, roundness)
-
-    profile = meniscus_layers(pad_size, top_size, 0.04, joint_height, 5)
-    layers = ((pad_size, -0.04, max(roundness, 0.2), True),) + tuple(
-        (size, z, max(roundness, 0.4), index == len(profile) - 1)
-        for index, (size, z) in enumerate(profile)
+    segments_per_corner = 8
+    joint_height, _ = smd_joint_dimensions(pad_size, roundness)
+    outline_roundness = max(roundness, 0.2)
+    vs, fs = add_octagon_layer(
+        vs, fs, pad_size, -0.04, outline_roundness, True, segments_per_corner
     )
-    for size, z, layer_roundness, fill in layers:
-        vs, fs = add_octagon_layer(vs, fs, size, z, layer_roundness, fill, segments_per_corner)
+    outline, ellipse = smd_wetting_outline(pad_size, outline_roundness, 32)
+    vs[1:, :2] = outline
+
+    angles = np.linspace(0.0, np.pi * 0.5 - np.pi / 64, 8)
+    for index, angle in enumerate(angles):
+        rise = np.sin(angle)
+        scale = np.cos(angle)
+        height = 0.02 + (joint_height - 0.02) * rise
+        is_cap = index == len(angles) - 1
+        cap_index = len(vs)
+        vs, fs = add_octagon_layer(
+            vs, fs, pad_size * scale, height, outline_roundness, is_cap, segments_per_corner
+        )
+        vs[-len(outline) :, :2] = (outline + (ellipse - outline) * rise**2) * scale
+        if is_cap:
+            vs[cap_index, 2] = joint_height
     vs += np.array((0, 0, pcb_thickness * 0.5))
 
     return vs, fs
+
+
+def smd_wetting_outline(
+    pad_size: NDArray[np.float64], roundness: float, count: int
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    angles = np.pi * 0.5 - np.arange(count) * (2.0 * np.pi / count)
+    directions = np.column_stack((np.cos(angles), np.sin(angles)))
+    half_size = pad_size * 0.5
+    ellipse = directions * half_size
+    rectangle = ellipse / np.max(np.abs(directions), axis=1, keepdims=True)
+    radius = half_size.min() * np.clip(roundness, 0.0, 1.0)
+    corner_center = half_size - radius
+    in_corner = np.all(np.abs(rectangle) > corner_center, axis=1)
+
+    ray_length_squared = np.maximum(np.sum(ellipse**2, axis=1), 1e-18)
+    projection = np.sum(np.abs(ellipse) * corner_center, axis=1)
+    discriminant = projection**2 - ray_length_squared * (np.sum(corner_center**2) - radius**2)
+    corner_scale = (projection + np.sqrt(np.maximum(discriminant, 0))) / ray_length_squared
+    outline = np.where(in_corner[:, None], ellipse * corner_scale[:, None], rectangle)
+    return outline, ellipse
 
 
 def rounded_rectangle_area(size: NDArray[np.float64], roundness: float) -> float:

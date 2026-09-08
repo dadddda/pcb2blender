@@ -2,6 +2,7 @@
 
 .direnv/
 .venv/
+/dist/
 __pycache__/
 
 *.blend[1-9]

@@ -167,7 +167,8 @@ Generated solder joints use a bounded geometry heuristic rather than one fixed p
 - Wider annular rings produce broader and taller fillets.
 - Slotted mounting tabs stay shallow, while circular through-hole pins can form taller fillets.
 - SMD bead height and edge spread scale with pad area and minimum pad width.
-- Smoothstep-interpolated layers approximate a surface-tension meniscus without a costly physics solve.
+- SMD beads have a rounded dome that follows the pad at the base and narrows to a smooth crown.
+- THT joints use smoothstep-interpolated layers to approximate a surface-tension meniscus.
 
 The `.pcb3d` format does not include exact terminal dimensions or paste volume, so this remains a
 visual approximation based on the available pad, hole, shape, and PCB-thickness metadata.
