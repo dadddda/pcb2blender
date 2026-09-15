@@ -16,6 +16,7 @@ from bl_ext.user_default.pcb3d_importer.solder_joints import (
 import bmesh
 import bpy
 import numpy as np
+from mathutils.bvhtree import BVHTree
 
 PCB_THICKNESS_MM = 1.6
 BOARD_SURFACE_Z_MM = PCB_THICKNESS_MM * 0.5
@@ -105,6 +106,70 @@ def test_smd_joint_has_a_closed_subdivided_surface(size: tuple[float, float], ro
         assert all(edge.is_manifold for edge in editable.edges)
     finally:
         editable.free()
+        evaluated.to_mesh_clear()
+
+
+@pytest.mark.usefixtures("empty_scene")
+@pytest.mark.parametrize("placed", (False, True), ids=("local", "rotated-flipped"))
+@pytest.mark.parametrize(
+    "pad_type, size, drill",
+    (
+        pytest.param("THT", (1.2, 2.01), (0.6, 1.2), id="vertical-slot"),
+        pytest.param("THT", (2.01, 1.2), (1.2, 0.6), id="horizontal-slot"),
+        pytest.param("THT", (1.2, 2.01), (0.6, 0.6), id="oval-round-drill"),
+        pytest.param("SMD", (0.8, 1.2), (0.0, 0.0), id="oval-smd"),
+        pytest.param("SMD", (0.3, 1.5), (0.0, 0.0), id="narrow-smd"),
+    ),
+)
+def test_oval_joint_covers_pad_perimeter(pad_type: str, size, drill, placed: bool):
+    result = bpy.ops.pcb2blender.solder_joint_add(
+        pad_type=pad_type,
+        pad_shape="OVAL",
+        pad_size=size,
+        hole_shape="OVAL",
+        hole_size=drill,
+        pcb_thickness=PCB_THICKNESS_MM,
+    )
+    assert result == {"FINISHED"}
+    joint = bpy.context.object
+    assert joint is not None
+    if placed:
+        joint.location = (0.012, -0.008, 0)
+        joint.rotation_euler.z = 0.65
+        joint.scale.z = -1.0
+    bpy.context.view_layer.update()
+    evaluated = joint.evaluated_get(bpy.context.evaluated_depsgraph_get())
+    mesh = evaluated.to_mesh()
+    try:
+        surface = BVHTree.FromPolygons(
+            [vertex.co[:] for vertex in mesh.vertices],
+            [polygon.vertices[:] for polygon in mesh.polygons],
+        )
+        radius = min(size) * 0.5
+        half_line = (np.array(size) - min(size)) * 0.5
+        perimeter = []
+        for angle in np.linspace(0, 2 * np.pi, 72, endpoint=False):
+            direction = np.array((np.cos(angle), np.sin(angle)))
+            perimeter.append(direction * radius + np.sign(direction) * half_line)
+        major_axis = int(np.argmax(size))
+        for amount in np.linspace(-1.0, 1.0, 17):
+            for side in (-1, 1):
+                point = np.zeros(2)
+                point[major_axis] = amount * half_line[major_axis]
+                point[1 - major_axis] = side * radius
+                perimeter.append(point)
+        for point in perimeter:
+            for side in (-1, 1) if pad_type == "THT" else (1,):
+                hit, _, _, _ = surface.ray_cast((*tuple(point * 0.001), side * 0.01), (0, 0, -side))
+                assert hit is not None, (pad_type, size, point, side)
+                assert hit.z * side * 1000 >= BOARD_SURFACE_Z_MM * 1.015, (
+                    pad_type,
+                    size,
+                    point,
+                    side,
+                    hit.z * side * 1000,
+                )
+    finally:
         evaluated.to_mesh_clear()
 
 

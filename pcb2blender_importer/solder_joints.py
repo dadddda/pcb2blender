@@ -113,6 +113,8 @@ class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
             pad_size += tht_pad_edge_expansion(pad_size, hole_size) * 2.0
         else:
             pad_size += smd_pad_edge_expansion(pad_size) * 2.0
+            if self.roundness >= 1.0:
+                pad_size += 0.03
 
         if self.pad_type == "THT":
             verts, faces = solder_joint_tht(pad_size, hole_size, self.roundness, self.pcb_thickness)
@@ -230,7 +232,7 @@ def solder_joint_tht(
         pin_size * 0.65,
         pad_size,
         -(pcb_thickness + component_side_height),
-        -(pcb_thickness - 0.03),
+        -(pcb_thickness + 0.05),
         5,
     )
     solder_layers = meniscus_layers(pad_size, pin_size, 0.05, joint_height, 7)
@@ -239,6 +241,7 @@ def solder_joint_tht(
             (size, z, max(roundness, 0.4), index == 0)
             for index, (size, z) in enumerate(component_layers)
         ),
+        (pad_size, -(pcb_thickness - 0.03), max(roundness, 0.4), False),
         (hole_size * 0.9, -0.30, 1.0, False),
         (pad_size, -0.10, max(roundness, 0.2), False),
         *(
@@ -267,11 +270,12 @@ def solder_joint_smd(
     outline, ellipse = smd_wetting_outline(pad_size, outline_roundness, 32)
     vs[1:, :2] = outline
 
+    contact_height = 0.04 if roundness >= 1.0 else 0.02
     angles = np.linspace(0.0, np.pi * 0.5 - np.pi / 64, 8)
     for index, angle in enumerate(angles):
         rise = np.sin(angle)
         scale = np.cos(angle)
-        height = 0.02 + (joint_height - 0.02) * rise
+        height = contact_height + (joint_height - contact_height) * rise
         is_cap = index == len(angles) - 1
         cap_index = len(vs)
         vs, fs = add_octagon_layer(
