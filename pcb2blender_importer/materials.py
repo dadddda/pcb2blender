@@ -1,6 +1,7 @@
 import re
 import tomllib
 from dataclasses import dataclass, field
+from math import isfinite
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, cast, overload
 
@@ -46,11 +47,28 @@ KICAD_2_MAT4CAD = {
 
 
 @dataclass(frozen=True)
+class MaterialGrain:
+    scale: float = 180.0
+    detail: float = 2.0
+    roughness: float = 0.65
+    distortion: float = 0.1
+    strength: float = 0.12
+    distance: float = 0.001
+    noise_dimensions: str = "3D"
+    noise_type: str = "FBM"
+    normalize: bool = True
+    lacunarity: float = 2.0
+    invert: bool = False
+    filter_width: float = 0.1
+
+
+@dataclass(frozen=True)
 class MaterialProfile:
     material_name: str
     bevel: bool = True
     texture_strength: float = 0.5
     scratches: float = 0.5
+    grain: MaterialGrain | None = None
 
 
 @dataclass(frozen=True)
@@ -98,7 +116,7 @@ class MaterialMap:
 
 def parse_color(section: str, key: str, value: Any) -> tuple[float, float, float]:
     if not isinstance(value, str) or not re.fullmatch(r"#?[0-9a-fA-F]{6}", value):
-        raise ValueError(f'pcb.{section}.{key} must be a six-digit hex color')
+        raise ValueError(f"pcb.{section}.{key} must be a six-digit hex color")
     return hex2rgb(value.removeprefix("#"))
 
 
@@ -109,9 +127,7 @@ def parse_unit_value(section: str, key: str, value: Any) -> float:
     return float(value)
 
 
-def parse_layer_style(
-    section: str, data: Any, presets: set[str] | None = None
-) -> PcbLayerStyle:
+def parse_layer_style(section: str, data: Any, presets: set[str] | None = None) -> PcbLayerStyle:
     if not isinstance(data, dict):
         raise ValueError(f"pcb.{section} must be a TOML table")
     allowed = {"color", "roughness", "texture_strength"}
@@ -128,9 +144,7 @@ def parse_layer_style(
     return PcbLayerStyle(
         preset,
         parse_color(section, "color", data["color"]) if "color" in data else None,
-        parse_unit_value(section, "roughness", data["roughness"])
-        if "roughness" in data
-        else None,
+        parse_unit_value(section, "roughness", data["roughness"]) if "roughness" in data else None,
         parse_unit_value(section, "texture_strength", data["texture_strength"])
         if "texture_strength" in data
         else None,
@@ -177,7 +191,17 @@ def parse_pcb_theme(data: Any) -> PcbTheme:
         if unknown := set(style).difference(allowed_mask):
             raise ValueError(f"unknown pcb.{section} options: {sorted(unknown)}")
         preset = style.get("preset")
-        mask_presets = {"GREEN", "RED", "YELLOW", "BLUE", "PURPLE", "WHITE", "BLACK", "MATTE_BLACK", "CUSTOM"}
+        mask_presets = {
+            "GREEN",
+            "RED",
+            "YELLOW",
+            "BLUE",
+            "PURPLE",
+            "WHITE",
+            "BLACK",
+            "MATTE_BLACK",
+            "CUSTOM",
+        }
         if preset is not None:
             if not isinstance(preset, str) or preset.upper() not in mask_presets:
                 raise ValueError(f'unknown pcb.{section} preset "{preset}"')
@@ -234,6 +258,7 @@ def parse_material_profile(name: str, data: Any) -> MaterialProfile:
         bevel = True
         texture_strength = 0.5
         scratches = 0.5
+        grain = None
     elif isinstance(data, dict):
         allowed = {
             "material",
@@ -243,6 +268,7 @@ def parse_material_profile(name: str, data: Any) -> MaterialProfile:
             "bevel",
             "texture_strength",
             "scratches",
+            "grain",
         }
         if unknown := set(data).difference(allowed):
             raise ValueError(f'unknown options in material profile "{name}": {sorted(unknown)}')
@@ -259,9 +285,7 @@ def parse_material_profile(name: str, data: Any) -> MaterialProfile:
             if not isinstance(custom_color, str) or not re.fullmatch(
                 r"#?[0-9a-fA-F]{6}", custom_color
             ):
-                raise ValueError(
-                    f'material profile "{name}" requires a six-digit custom_color'
-                )
+                raise ValueError(f'material profile "{name}" requires a six-digit custom_color')
             color = f"custom_{custom_color.removeprefix('#')}"
         elif "custom_color" in data:
             raise ValueError(
@@ -272,20 +296,92 @@ def parse_material_profile(name: str, data: Any) -> MaterialProfile:
         bevel = data.get("bevel", True)
         texture_strength = data.get("texture_strength", 0.5)
         scratches = data.get("scratches", 0.5)
+        grain = parse_material_grain(name, data["grain"]) if "grain" in data else None
         if not isinstance(bevel, bool):
             raise ValueError(f'material profile "{name}" bevel must be true or false')
         for option, value in (
             ("texture_strength", texture_strength),
             ("scratches", scratches),
         ):
-            if not isinstance(value, (int, float)) or isinstance(value, bool) or not 0 <= value <= 1:
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not 0 <= value <= 1
+            ):
                 raise ValueError(f'material profile "{name}" {option} must be between 0 and 1')
     else:
         raise ValueError(f'material profile "{name}" must be a string or table')
 
     if not Mat4CadMaterial.from_name(material_name):
         raise ValueError(f'unknown Mat4CAD material "{material_name}" in profile "{name}"')
-    return MaterialProfile(material_name, bevel, float(texture_strength), float(scratches))
+    return MaterialProfile(material_name, bevel, float(texture_strength), float(scratches), grain)
+
+
+def parse_material_grain(profile_name: str, data: Any) -> MaterialGrain:
+    if not isinstance(data, dict):
+        raise ValueError(f'material profile "{profile_name}" grain must be a table')
+    numeric_options = {
+        "scale",
+        "detail",
+        "roughness",
+        "distortion",
+        "strength",
+        "distance",
+        "lacunarity",
+        "filter_width",
+    }
+    enum_options = {
+        "noise_dimensions": {"1D", "2D", "3D", "4D"},
+        "noise_type": {
+            "FBM",
+            "MULTIFRACTAL",
+            "RIDGED_MULTIFRACTAL",
+            "HYBRID_MULTIFRACTAL",
+            "HETERO_TERRAIN",
+        },
+    }
+    boolean_options = {"normalize", "invert"}
+    allowed = numeric_options | enum_options.keys() | boolean_options
+    if unknown := set(data).difference(allowed):
+        raise ValueError(
+            f'unknown grain options in material profile "{profile_name}": {sorted(unknown)}'
+        )
+    defaults = MaterialGrain()
+    values = {option: data.get(option, getattr(defaults, option)) for option in numeric_options}
+    for option, value in values.items():
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or not isfinite(value):
+            raise ValueError(
+                f'material profile "{profile_name}" grain {option} must be a finite number'
+            )
+    if values["scale"] <= 0:
+        raise ValueError(f'material profile "{profile_name}" grain scale must be greater than 0')
+    if not 0 <= values["detail"] <= 15:
+        raise ValueError(f'material profile "{profile_name}" grain detail must be between 0 and 15')
+    for option in ("roughness", "strength"):
+        if not 0 <= values[option] <= 1:
+            raise ValueError(
+                f'material profile "{profile_name}" grain {option} must be between 0 and 1'
+            )
+    for option in ("distortion", "lacunarity", "filter_width", "distance"):
+        if values[option] < 0:
+            raise ValueError(f'material profile "{profile_name}" grain {option} cannot be negative')
+
+    settings: dict[str, Any] = {key: float(value) for key, value in values.items()}
+    for option, choices in enum_options.items():
+        value = data.get(option, getattr(defaults, option))
+        if not isinstance(value, str) or value.upper() not in choices:
+            raise ValueError(
+                f'material profile "{profile_name}" grain {option} must be one of {sorted(choices)}'
+            )
+        settings[option] = value.upper()
+    for option in boolean_options:
+        value = data.get(option, getattr(defaults, option))
+        if not isinstance(value, bool):
+            raise ValueError(
+                f'material profile "{profile_name}" grain {option} must be true or false'
+            )
+        settings[option] = value
+    return MaterialGrain(**settings)
 
 
 def load_material_map(path: Path) -> MaterialMap:
@@ -299,14 +395,15 @@ def load_material_map(path: Path) -> MaterialMap:
     profiles_data = data.get("profiles", {})
     components_data = data.get("components", {})
     pcb_data = data.get("pcb")
-    if not all(isinstance(value, dict) for value in (materials_data, profiles_data, components_data)):
+    if not all(
+        isinstance(value, dict) for value in (materials_data, profiles_data, components_data)
+    ):
         raise ValueError("materials, profiles, and components must be TOML tables")
     if not materials_data and not profiles_data and not components_data and pcb_data is None:
         raise ValueError("material map must contain materials, profiles, components, or pcb")
 
     profiles = {
-        name: parse_material_profile(name, profile)
-        for name, profile in profiles_data.items()
+        name: parse_material_profile(name, profile) for name, profile in profiles_data.items()
     }
     materials = {
         source_name: parse_material_profile(source_name, profile)
@@ -347,6 +444,37 @@ def setup_material(material: bpy.types.Material, profile: MaterialProfile):
         node.use_bevel = profile.bevel
         node.inputs["Texture Strength"].default_value = profile.texture_strength
         node.inputs["Scratches"].default_value = profile.scratches
+        setup_material_grain(material.node_tree, node, profile.grain)
+
+
+def setup_material_grain(
+    node_tree: bpy.types.NodeTree, mat4cad_node: bpy.types.Node, grain: MaterialGrain | None
+):
+    if grain is None:
+        return
+
+    noise = node_tree.nodes.new("ShaderNodeTexNoise")
+    noise.name = noise.label = "Grain Noise"
+    noise.location = (mat4cad_node.location.x - 420, mat4cad_node.location.y - 260)
+    noise.noise_dimensions = grain.noise_dimensions
+    noise.noise_type = grain.noise_type
+    noise.normalize = grain.normalize
+    noise.inputs["Scale"].default_value = grain.scale
+    noise.inputs["Detail"].default_value = grain.detail
+    noise.inputs["Roughness"].default_value = grain.roughness
+    noise.inputs["Lacunarity"].default_value = grain.lacunarity
+    noise.inputs["Distortion"].default_value = grain.distortion
+
+    bump = node_tree.nodes.new("ShaderNodeBump")
+    bump.name = bump.label = "Grain Bump"
+    bump.location = (mat4cad_node.location.x - 190, mat4cad_node.location.y - 260)
+    bump.invert = grain.invert
+    bump.inputs["Strength"].default_value = grain.strength
+    bump.inputs["Distance"].default_value = grain.distance
+    bump.inputs["Filter Width"].default_value = grain.filter_width
+
+    node_tree.links.new(noise.outputs["Fac"], bump.inputs["Height"])
+    node_tree.links.new(bump.outputs["Normal"], mat4cad_node.inputs["Normal"])
 
 
 def setup_mat4cad_node(node: Any, profile: MaterialProfile):
@@ -362,6 +490,7 @@ def setup_mat4cad_node(node: Any, profile: MaterialProfile):
     node.use_bevel = profile.bevel
     node.inputs["Texture Strength"].default_value = profile.texture_strength
     node.inputs["Scratches"].default_value = profile.scratches
+    setup_material_grain(node.id_data, node, profile.grain)
 
 
 def set_color_input(node: Any, name: str, color: tuple[float, float, float] | None):
@@ -420,9 +549,9 @@ def apply_pcb_theme(node_tree: bpy.types.ShaderNodeTree, theme: PcbTheme | None)
         set_float_input(node, "Texture Strength", style.texture_strength)
 
     if theme.silkscreen_quality is not None:
-        node_tree.nodes["shader"].inputs["Silkscreen Quality"].default_value = (
-            theme.silkscreen_quality
-        )
+        node_tree.nodes["shader"].inputs[
+            "Silkscreen Quality"
+        ].default_value = theme.silkscreen_quality
 
 
 def enhance_component_materials(
@@ -434,7 +563,9 @@ def enhance_component_materials(
         if not assignments:
             continue
         for index, material in enumerate(mesh.materials):
-            if not material or not (profile := assignments.get(remove_blender_name_suffix(material.name))):
+            if not material or not (
+                profile := assignments.get(remove_blender_name_suffix(material.name))
+            ):
                 continue
             configured_material = material.copy()
             mesh.materials[index] = configured_material

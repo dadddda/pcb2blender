@@ -84,6 +84,20 @@ bevel = true
 texture_strength = 0.15
 scratches = 0.05
 
+[profiles.ic_body.grain]
+noise_dimensions = "3D"
+noise_type = "FBM"
+normalize = true
+scale = 200.0
+detail = 3.0
+roughness = 0.7
+lacunarity = 1.0
+distortion = 0.0
+invert = false
+strength = 1.0
+distance = 1.0
+filter_width = 0.1
+
 [profiles.custom_body]
 material = "plastic"
 color = "custom"
@@ -93,6 +107,9 @@ bevel = true
 texture_strength = 0.2
 scratches = 0.0
 ```
+
+The optional `grain` table adds a **Noise Texture** and **Bump** node to the material and connects
+`Noise Fac > Bump Height > Mat4CAD Normal`. Omit `grain` to leave the material graph unchanged.
 
 Assign profiles to a model's normalized material slots. All instances of the model share the rule;
 Blender suffixes are ignored, so `SHAPE_1.013` matches `SHAPE_1`:

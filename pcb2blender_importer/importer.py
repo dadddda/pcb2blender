@@ -23,6 +23,7 @@ from bpy.types import Mesh
 from bpy_extras.io_utils import ImportHelper, axis_conversion, orientation_helper
 from mathutils import Matrix, Vector
 
+from .board_geometry import refine_board_holes
 from .io_scene_x3d.source import ImportX3D, X3D_PT_import_transform, import_x3d
 from .materials import (
     LAYER_BOARD_EDGE,
@@ -563,6 +564,11 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
                 obj.select_set(True)
             context.view_layer.objects.active = next(iter(self.board_objects.values()))
 
+        for board_name, board_obj in self.board_objects.items():
+            top_left = pcb.boards[board_name].bounds.top_left
+            if refine_board_holes(board_obj.data, pcb.pads.values(), (top_left[0], -top_left[1])):
+                self.setup_uvs(board_obj, pcb.layers_bounds, (top_left[0], -top_left[1]))
+
         # fix smooth shading issues
         bpy.ops.object.shade_smooth_by_angle(angle=radians(89), keep_sharp_edges=False)
 
@@ -713,7 +719,9 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
         return obj
 
     @staticmethod
-    def setup_uvs(obj: Object[Mesh], layers_bounds: Bounds):
+    def setup_uvs(
+        obj: Object[Mesh], layers_bounds: Bounds, offset_mm: tuple[float, float] = (0.0, 0.0)
+    ):
         mesh = obj.data
 
         vertices = np.empty(len(mesh.vertices) * 3)
@@ -725,7 +733,7 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
         indices = np.empty(len(mesh.loops), dtype=int)
         mesh.loops.foreach_get("vertex_index", indices)
 
-        offset = layers_bounds.top_left * np.array((1, -1))
+        offset = layers_bounds.top_left * np.array((1, -1)) - offset_mm
         uvs = (vertices[:, :2][indices] * M_TO_MM - offset) / layers_bounds.size + np.array((0, 1))
 
         uv_layer = mesh.uv_layers[0]

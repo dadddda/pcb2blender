@@ -31,6 +31,28 @@ color = "#aaaaa6"
 roughness = 0.25
 texture_strength = 1.0
 
+[profiles.ic_body]
+material = "plastic"
+color = "jet_black"
+finish = "matte"
+bevel = true
+texture_strength = 0.15
+scratches = 0.05
+
+[profiles.ic_body.grain]
+noise_dimensions = "3D"
+noise_type = "FBM"
+normalize = true
+scale = 200.0
+detail = 3.0
+roughness = 0.7
+lacunarity = 1.0
+distortion = 0.0
+invert = false
+strength = 1.0
+distance = 1.0
+filter_width = 0.1
+
 [profiles.resistor_top]
 material = "plastic"
 color = "jet_black"
@@ -62,6 +84,12 @@ finish = "semi_matte"
 bevel = true
 texture_strength = 0.12
 scratches = 0.08
+
+# IC body and connection materials for an LQFP package.
+[components."LQFP-64_10x10mm_P0.5mm".materials]
+SHAPE_1 = "ic_body"
+SHAPE_5 = "tin_connection"
+SHAPE_151 = "tin_connection"
 
 # Repeated resistor instances share these model-level rules.
 [components."R_0402_1005Metric".materials]

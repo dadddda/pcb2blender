@@ -3,6 +3,7 @@ from itertools import chain, product
 from pathlib import Path
 from typing import Any
 
+import bl_ext.user_default.pcb3d_importer.importer as importer_module
 import pytest
 from bl_ext.user_default.pcb3d_importer.importer import (
     resolve_hole_shape,
@@ -11,6 +12,7 @@ from bl_ext.user_default.pcb3d_importer.importer import (
 from bl_ext.user_default.pcb3d_importer.pcb3d import DrillShape
 
 import bpy
+import numpy as np
 
 PCB_FILEPATHS = sorted((Path(__file__).parent / "test_pcbs").resolve().glob("**/*.pcb3d"))
 
@@ -79,6 +81,68 @@ def test_importer_creates_scene_objects(capsys: pytest.CaptureFixture[str], path
     result = pcb2blender_import_pcb3d(filepath=str(path))
 
     assert_imported_scene(result, capsys)
+
+
+@pytest.mark.usefixtures("empty_scene")
+@pytest.mark.parametrize("cut_boards", (False, True), ids=("whole-board", "cut-boards"))
+def test_importer_refines_drilled_holes(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, cut_boards: bool
+):
+    calls = []
+    refine = importer_module.refine_board_holes
+
+    def check_refinement(mesh, pads, offset):
+        original_vertices = np.array([vertex.co[:] for vertex in mesh.vertices])
+        topology = len(mesh.vertices) - len(mesh.edges) + len(mesh.polygons)
+        face_count = len(mesh.polygons)
+        count = refine(mesh, pads, offset)
+        calls.append(count)
+        if count:
+            assert len(mesh.polygons) > face_count
+            assert len(mesh.vertices) > len(original_vertices)
+            assert len(mesh.vertices) - len(mesh.edges) + len(mesh.polygons) == topology
+            vertices = np.array([vertex.co[:] for vertex in mesh.vertices])
+            np.testing.assert_allclose(
+                vertices.min(axis=0), original_vertices.min(axis=0), atol=1e-8
+            )
+            np.testing.assert_allclose(
+                vertices.max(axis=0), original_vertices.max(axis=0), atol=1e-8
+            )
+        return count
+
+    monkeypatch.setattr(importer_module, "refine_board_holes", check_refinement)
+    path = next(path for path in PCB_FILEPATHS if path.stem == "extender_custom_colors")
+    result = pcb2blender_import_pcb3d(
+        filepath=str(path),
+        cut_boards=cut_boards,
+        center_boards=False,
+        stack_boards=False,
+        add_solder_joints="NONE",
+    )
+
+    assert_imported_scene(result, capsys)
+    assert sum(calls) > 0
+    for obj in bpy.context.scene.objects:
+        assert obj.modifiers.get("PCB Subdivision") is None
+        if obj.type != "MESH" or "pcb_board_edge" not in obj.data.attributes:
+            continue
+        assert len(obj.data.uv_layers) > 0
+        uv = np.array([item.uv[:] for item in obj.data.uv_layers[0].data])
+        coords = np.array(
+            [
+                (obj.matrix_world @ obj.data.vertices[loop.vertex_index].co).xy[:]
+                for loop in obj.data.loops
+            ]
+        )
+        assert np.all(np.isfinite(uv))
+        for axis in (0, 1):
+            coefficients = np.linalg.lstsq(
+                np.column_stack((coords[:, axis], np.ones(len(coords)))), uv[:, axis], rcond=None
+            )[0]
+            np.testing.assert_allclose(
+                coords[:, axis] * coefficients[0] + coefficients[1], uv[:, axis], atol=2e-5
+            )
+        assert "pcb_through_holes" in obj.data.attributes
 
 
 @pytest.mark.usefixtures("empty_scene")
@@ -217,6 +281,66 @@ texture_strength = 0.3
     assert silkscreen.silkscreen == "BLACK"
     assert silkscreen.inputs["Texture Strength"].default_value == pytest.approx(0.3)
     assert shader.inputs["Silkscreen Quality"].default_value == pytest.approx(0.9)
+
+
+@pytest.mark.usefixtures("empty_scene")
+def test_importer_applies_component_grain(
+    write_material_map: Callable[[str], Path], capsys: pytest.CaptureFixture[str]
+):
+    material_map_path = write_material_map(
+        """
+[profiles.ic_body]
+material = "plastic"
+color = "jet_black"
+finish = "matte"
+
+[profiles.ic_body.grain]
+noise_dimensions = "3D"
+noise_type = "FBM"
+normalize = true
+scale = 200.0
+detail = 3.0
+roughness = 0.7
+lacunarity = 1.0
+distortion = 0.0
+invert = false
+strength = 1.0
+distance = 1.0
+filter_width = 0.1
+
+[components."MSOP-16_3x4mm_P0.5mm".materials]
+IC-BODY-EPOXY-04 = "ic_body"
+""",
+    )
+
+    result = pcb2blender_import_pcb3d(
+        filepath=str(PCB_FILEPATHS[0]),
+        material_map_selection="MANUAL",
+        material_map_path=str(material_map_path),
+    )
+
+    assert_imported_scene(result, capsys)
+    mesh = bpy.data.meshes["MSOP-16_3x4mm_P0.5mm"]
+    material = next(material for material in mesh.materials if material.name.startswith("IC-BODY"))
+    assert material is not None and material.node_tree is not None
+    node_tree = material.node_tree
+    noise = node_tree.nodes["Grain Noise"]
+    bump = node_tree.nodes["Grain Bump"]
+    mat4cad = next(node for node in node_tree.nodes if node.bl_idname == "ShaderNodeBsdfMat4cad")
+    assert noise.noise_dimensions == "3D"
+    assert noise.noise_type == "FBM"
+    assert noise.normalize is True
+    assert noise.inputs["Scale"].default_value == pytest.approx(200.0)
+    assert noise.inputs["Detail"].default_value == pytest.approx(3.0)
+    assert noise.inputs["Roughness"].default_value == pytest.approx(0.7)
+    assert noise.inputs["Lacunarity"].default_value == pytest.approx(1.0)
+    assert noise.inputs["Distortion"].default_value == pytest.approx(0.0)
+    assert bump.invert is False
+    assert bump.inputs["Strength"].default_value == pytest.approx(1.0)
+    assert bump.inputs["Distance"].default_value == pytest.approx(1.0)
+    assert bump.inputs["Filter Width"].default_value == pytest.approx(0.1)
+    assert bump.inputs["Height"].links[0].from_node == noise
+    assert mat4cad.inputs["Normal"].links[0].from_node == bump
 
 
 @pytest.mark.usefixtures("empty_scene")
