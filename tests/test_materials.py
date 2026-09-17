@@ -25,6 +25,24 @@ def test_material_map_loads_global_assignments(write_material_map: Callable[[str
     }
 
 
+def test_material_map_loads_solder_only(write_material_map: Callable[[str], Path]):
+    path = write_material_map(
+        """
+[solder.J3]
+height = 0.55
+terminal_size = [0.406, 1.8]
+"""
+    )
+
+    material_map = load_material_map(path)
+
+    assert material_map.materials == {}
+    assert material_map.components == {}
+    assert material_map.pcb is None
+    assert material_map.solder["J3"][0].height == 0.55
+    assert material_map.solder["J3"][0].terminal_offset == (0.0, 0.0)
+
+
 def test_material_map_loads_component_profiles(write_material_map: Callable[[str], Path]):
     path = write_material_map(
         """
@@ -332,7 +350,7 @@ def test_material_map_rejects_invalid_grain_controls(
         pytest.param("not valid toml", "could not load material map", id="invalid-toml"),
         pytest.param(
             'name = "missing table"\n',
-            "must contain materials, profiles, components, or pcb",
+            "must contain materials, profiles, components, pcb, or solder",
             id="missing-configuration",
         ),
         pytest.param(

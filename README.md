@@ -15,6 +15,7 @@ This fork builds on [30350n/pcb2blender](https://github.com/30350n/pcb2blender) 
 - Model-scoped material rules for repeated components.
 - Improved circular, oval, and slotted THT solder joints.
 - Adaptive THT profiles and raised SMD solder beads.
+- Optional TOML solder overrides for selected SMD components.
 - Compatibility with current KiCad drill-shape metadata.
 
 <img src="images/e201_soldered.jpg" alt="Rendered solder joints"/>
@@ -189,6 +190,29 @@ Generated solder joints use a bounded geometry heuristic rather than one fixed p
 
 The `.pcb3d` format does not include exact terminal dimensions or paste volume, so this remains a
 visual approximation based on the available pad, hole, shape, and PCB-thickness metadata.
+
+### Selected component overrides
+
+Add `[solder.<reference>]` to your material-map TOML to override selected SMD joints by KiCad
+reference, not model filename. Other joints keep their defaults.
+
+```toml
+[solder.J3]
+pad_size = [0.74, 2.79]
+height = 0.55
+terminal_size = [0.406, 1.8]
+terminal_offset = [0.0, 0.0]
+```
+
+All dimensions are millimeters. `height` is above the PCB surface; `terminal_size` and optional
+`terminal_offset` describe the contact region in pad-local X/Y axes. The region must fit inside
+the solder pad; the offset defaults to zero.
+
+Repeated `[[solder.J2]]` blocks form a **list of rules**. Each rule's `pad_size` selects matching
+pads: the examples use `[0.35, 0.7]` for narrow pads and `[0.65, 0.7]` for wide ones.
+Omitting `pad_size` provides a fallback; size-specific rules win, and ambiguous matches are rejected.
+
+See [material_map.example.toml](material_map.example.toml) for connector settings.
 
 ## Development
 

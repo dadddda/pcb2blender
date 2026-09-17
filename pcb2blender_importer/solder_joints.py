@@ -7,6 +7,7 @@ from numpy.typing import NDArray
 
 from .custom_node_utils import NodesDef, setup_node_tree
 from .importer import MM_TO_M
+from .solder_profiles import SmdSolderProfile
 
 if TYPE_CHECKING:
     from bpy.stub_internal.rna_enums import OperatorReturnItems
@@ -92,14 +93,16 @@ class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
 
     reuse_material: BoolProperty(name="Reuse Material", default=False)
 
+    smd_height: FloatProperty(name="SMD Fillet Height (mm)", default=0.0, min=0.0)
+    terminal_size: FloatVectorProperty(
+        name="Terminal Size (mm)", size=2, default=(0.0, 0.0), min=0.0
+    )
+    terminal_offset: FloatVectorProperty(
+        name="Terminal Offset (mm)", size=2, default=(0.0, 0.0)
+    )
+
     def execute(self, context: bpy.types.Context) -> set[OperatorReturnItems]:
         assert context.collection and context.view_layer
-
-        name = "Solder Joint"
-        mesh = bpy.data.meshes.new(name)
-        obj = bpy.data.objects.new(name, mesh)
-
-        context.collection.objects.link(obj)
 
         if self.pad_shape in {"SQUARE", "CIRCULAR"}:
             self.pad_size[1] = self.pad_size[0]
@@ -119,9 +122,25 @@ class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
         if self.pad_type == "THT":
             verts, faces = solder_joint_tht(pad_size, hole_size, self.roundness, self.pcb_thickness)
         elif self.pad_type == "SMD":
-            verts, faces = solder_joint_smd(pad_size, self.roundness, self.pcb_thickness)
+            profile = None
+            if self.smd_height > 0:
+                profile = SmdSolderProfile(
+                    self.smd_height, tuple(self.terminal_size), tuple(self.terminal_offset)
+                )
+            try:
+                verts, faces = solder_joint_smd(
+                    pad_size, self.roundness, self.pcb_thickness, profile
+                )
+            except ValueError as error:
+                self.report({"ERROR"}, str(error))
+                return {"CANCELLED"}
         else:
             assert_never(self.pad_type)
+
+        name = "Solder Joint"
+        mesh = bpy.data.meshes.new(name)
+        obj = bpy.data.objects.new(name, mesh)
+        context.collection.objects.link(obj)
 
         verts *= MM_TO_M
         indices = faces.flatten()
@@ -205,6 +224,10 @@ class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
             layout.prop(self, "hole_shape")
             layout.prop(self, "hole_size", index=0 if self.hole_shape == "CIRCULAR" else -1)
             layout.separator()
+        elif self.smd_height > 0:
+            layout.prop(self, "smd_height")
+            layout.prop(self, "terminal_size")
+            layout.prop(self, "terminal_offset")
 
         layout.prop(self, "pcb_thickness")
         layout.separator()
@@ -257,8 +280,11 @@ def solder_joint_tht(
 
 
 def solder_joint_smd(
-    pad_size: NDArray[np.float64], roundness: float = 0.0, pcb_thickness: float = 1.6
+    pad_size: NDArray[np.float64], roundness: float = 0.0, pcb_thickness: float = 1.6,
+    profile: SmdSolderProfile | None = None,
 ):
+    if profile is not None:
+        return solder_joint_smd_terminal(pad_size, roundness, pcb_thickness, profile)
     vs = np.empty((0, 3), dtype=float)
     fs = np.empty((0, 4), dtype=int)
     segments_per_corner = 8
@@ -287,6 +313,46 @@ def solder_joint_smd(
     vs += np.array((0, 0, pcb_thickness * 0.5))
 
     return vs, fs
+
+
+def solder_joint_smd_terminal(
+    pad_size: NDArray[np.float64], roundness: float, pcb_thickness: float,
+    profile: SmdSolderProfile,
+):
+    terminal_size = np.array(profile.terminal_size)
+    offset = np.array(profile.terminal_offset)
+    if (
+        not np.all(np.isfinite((*terminal_size, *offset, profile.height)))
+        or terminal_size.min() <= 0 or profile.height <= 0
+    ):
+        raise ValueError("SMD terminal size and height must be positive finite values")
+    if np.any(terminal_size + np.abs(offset) * 2 > pad_size):
+        raise ValueError("SMD terminal footprint must fit inside the solder pad")
+    outline, _ = smd_wetting_outline(pad_size, max(roundness, 0.2), 32)
+    expanded_terminal = np.minimum(terminal_size + 0.06, pad_size - np.abs(offset) * 2)
+    terminal_outline, _ = smd_wetting_outline(expanded_terminal, 0.2, 32)
+    terminal_outline += offset
+    radius = pad_size.min() * 0.5 * np.clip(max(roundness, 0.2), 0, 1)
+    corner_distance = np.maximum(np.abs(terminal_outline) - (pad_size / 2 - radius), 0)
+    if np.any(np.linalg.norm(corner_distance, axis=1) > radius + 1e-8):
+        raise ValueError("SMD terminal footprint must fit inside the solder pad contour")
+
+    vertices = np.empty((0, 3), dtype=float)
+    faces = np.empty((0, 4), dtype=int)
+    vertices, faces = add_octagon_layer(vertices, faces, pad_size, -0.04, 0.2, True, 8)
+    vertices[1:, :2] = outline
+    contact_height = min(0.04, profile.height * 0.2)
+    for index, amount in enumerate(np.linspace(0, 1, 8)):
+        height = contact_height + (profile.height - contact_height) * amount
+        contour = terminal_outline + (outline - terminal_outline) * (1 - amount)**2
+        vertices, faces = add_octagon_layer(
+            vertices, faces, pad_size, height, 0.2, index == 7, 8
+        )
+        vertices[-32:, :2] = contour
+        if index == 7:
+            vertices[-33, :2] = offset
+    vertices[:, 2] += pcb_thickness * 0.5
+    return vertices, faces
 
 
 def smd_wetting_outline(

@@ -36,6 +36,7 @@ from .materials import (
     setup_pcb_material,
 )
 from .pcb3d import PCB3D, Board, Bounds, DrillShape, PadFabType, PadShape, PadType
+from .solder_profiles import match_solder_profile
 
 if TYPE_CHECKING:
     from bpy.stub_internal.rna_enums import OperatorReturnItems
@@ -202,7 +203,9 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
             self.material_map_file,
             self.material_map_path,
         )
-        if self.enhance_materials and material_map_path:
+        if material_map_path and (
+            self.enhance_materials or (self.import_components and self.add_solder_joints != "NONE")
+        ):
             try:
                 self.material_map = load_material_map(material_map_path)
             except ValueError as error:
@@ -632,18 +635,31 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
                         )
                         continue
 
-                cache_id = (pad_type, pad_shape, pad_size, hole_shape, hole_size, roundness)
-                if not (solder_joint := solder_joint_cache.get(cache_id)):
-                    bpy.ops.pcb2blender.solder_joint_add(  # pyright: ignore[reportAttributeAccessIssue]
-                        pad_type=pad_type,
-                        pad_shape=pad_shape,
-                        pad_size=pad_size,
-                        roundness=roundness,
-                        hole_shape=hole_shape,
-                        hole_size=hole_size,
-                        pcb_thickness=pcb.stackup.thickness_mm,
-                        reuse_material=True,
+                try:
+                    solder_profile = (
+                        match_solder_profile(self.material_map.solder, pad_name, pad_size)
+                        if pad.pad_type == PadType.SMD else None
                     )
+                except ValueError as error:
+                    return self.error(str(error))
+                cache_id = (pad_type, pad_shape, pad_size, hole_shape, hole_size, roundness, solder_profile)
+                if not (solder_joint := solder_joint_cache.get(cache_id)):
+                    try:
+                        bpy.ops.pcb2blender.solder_joint_add(
+                            pad_type=pad_type,
+                            pad_shape=pad_shape,
+                            pad_size=pad_size,
+                            roundness=roundness,
+                            hole_shape=hole_shape,
+                            hole_size=hole_size,
+                            pcb_thickness=pcb.stackup.thickness_mm,
+                            reuse_material=True,
+                            smd_height=solder_profile.height if solder_profile else 0.0,
+                            terminal_size=solder_profile.terminal_size if solder_profile else (0.0, 0.0),
+                            terminal_offset=solder_profile.terminal_offset if solder_profile else (0.0, 0.0),
+                        )
+                    except RuntimeError as error:
+                        return self.error(f"could not generate solder for {pad_name}: {error}")
                     solder_joint = cast(Object[Mesh], context.object)
                     solder_joint_cache[cache_id] = solder_joint
 
@@ -934,12 +950,16 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
         layout.prop(self, "merge_materials")
         layout.prop(self, "enhance_materials")
         col = layout.column()
-        col.enabled = self.enhance_materials
+        col.enabled = self.enhance_materials or (
+            self.import_components and self.add_solder_joints != "NONE"
+        )
         col.prop(self, "material_map_selection")
         if self.material_map_selection == "FILE":
             col.prop(self, "material_map_file")
         elif self.material_map_selection == "MANUAL":
             col.prop(self, "material_map_path")
+        col = layout.column()
+        col.enabled = self.enhance_materials
         col.label(text="PCB Material")
         col.prop(self, "pcb_material", text="")
         if self.pcb_material == "RASTERIZED":

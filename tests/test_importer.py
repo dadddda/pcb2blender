@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from dataclasses import replace
 from itertools import chain, product
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,7 @@ from bl_ext.user_default.pcb3d_importer.importer import (
     resolve_hole_shape,
     resolve_material_map_path,
 )
-from bl_ext.user_default.pcb3d_importer.pcb3d import DrillShape
+from bl_ext.user_default.pcb3d_importer.pcb3d import PCB3D, DrillShape, PadShape, PadType
 
 import bpy
 import numpy as np
@@ -81,6 +82,63 @@ def test_importer_creates_scene_objects(capsys: pytest.CaptureFixture[str], path
     result = pcb2blender_import_pcb3d(filepath=str(path))
 
     assert_imported_scene(result, capsys)
+
+
+@pytest.mark.usefixtures("empty_scene")
+@pytest.mark.parametrize("enhance_materials", (False, True), ids=("original-materials", "enhanced-materials"))
+def test_importer_applies_selective_solder_profiles(
+    write_material_map, monkeypatch, capsys, enhance_materials
+):
+    from_file = PCB3D.from_file
+    captured = {}
+
+    def with_connector_pads(*args, **kwargs):
+        pcb = from_file(*args, **kwargs)
+        source = next(iter(pcb.pads.values()))
+        pad = replace(
+            source, pad_type=PadType.SMD, shape=PadShape.RECT, size=(0.74, 2.79),
+            is_flipped=False, rotation=0.0, has_model=True, has_paste=True, is_tht_or_smd=True,
+        )
+        pcb.pads = {
+            "Connector_J3_0_0": pad,
+            "Connector_J3_0_1": replace(pad, rotation=1.2, is_flipped=True),
+            "Other_J4_1_0": pad,
+            "Mount_J3_0_2": replace(pad, pad_type=PadType.THT, drill_size=(0.4, 0.8)),
+        }
+        captured["thickness"] = pcb.stackup.thickness_mm
+        return pcb
+
+    monkeypatch.setattr(PCB3D, "from_file", with_connector_pads)
+    path = write_material_map(
+        """
+[solder.J3]
+height = 0.55
+terminal_size = [0.406, 1.8]
+terminal_offset = [0.0, -0.1]
+"""
+    )
+    result = pcb2blender_import_pcb3d(
+        filepath=str(PCB_FILEPATHS[0]), material_map_selection="MANUAL",
+        material_map_path=str(path), enhance_materials=enhance_materials,
+        center_boards=False, cut_boards=False, stack_boards=False,
+    )
+    assert_imported_scene(result, capsys)
+    configured = bpy.data.objects["SOLDER_Connector_J3_0_0"]
+    flipped = bpy.data.objects["SOLDER_Connector_J3_0_1"]
+    default = bpy.data.objects["SOLDER_Other_J4_1_0"]
+    mounting = bpy.data.objects["SOLDER_Mount_J3_0_2"]
+    assert configured.data == flipped.data
+    assert configured.data != default.data
+    assert configured.data != mounting.data
+    assert configured.scale.z == 1
+    assert flipped.scale.z == -1
+    assert flipped.rotation_euler.z == pytest.approx(1.2)
+    half_thickness = captured["thickness"] * 0.5
+    assert max(vertex.co.z for vertex in configured.data.vertices) * 1000 == pytest.approx(
+        half_thickness + 0.55
+    )
+    assert max(vertex.co.z for vertex in default.data.vertices) * 1000 <= half_thickness + 0.321
+    assert min(vertex.co.z for vertex in mounting.data.vertices) * 1000 < -half_thickness
 
 
 @pytest.mark.usefixtures("empty_scene")

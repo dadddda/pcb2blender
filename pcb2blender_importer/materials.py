@@ -19,6 +19,7 @@ from .mat4cad.blender import (
 )
 from .mat4cad.colors import PCB_COLORS
 from .mat4cad.core import hex2rgb, lin2srgb, rgb2hex, srgb2lin
+from .solder_profiles import SmdSolderProfile, parse_solder_profiles
 
 LAYER_BOARD_EDGE = "pcb_board_edge"
 LAYER_THROUGH_HOLES = "pcb_through_holes"
@@ -112,6 +113,7 @@ class MaterialMap:
     materials: dict[str, MaterialProfile] = field(default_factory=dict)
     components: dict[str, dict[str, MaterialProfile]] = field(default_factory=dict)
     pcb: PcbTheme | None = None
+    solder: dict[str, tuple[SmdSolderProfile, ...]] = field(default_factory=dict)
 
 
 def parse_color(section: str, key: str, value: Any) -> tuple[float, float, float]:
@@ -395,12 +397,16 @@ def load_material_map(path: Path) -> MaterialMap:
     profiles_data = data.get("profiles", {})
     components_data = data.get("components", {})
     pcb_data = data.get("pcb")
+    solder_data = data.get("solder", {})
     if not all(
         isinstance(value, dict) for value in (materials_data, profiles_data, components_data)
     ):
         raise ValueError("materials, profiles, and components must be TOML tables")
-    if not materials_data and not profiles_data and not components_data and pcb_data is None:
-        raise ValueError("material map must contain materials, profiles, components, or pcb")
+    if (
+        not materials_data and not profiles_data and not components_data
+        and pcb_data is None and not solder_data
+    ):
+        raise ValueError("material map must contain materials, profiles, components, pcb, or solder")
 
     profiles = {
         name: parse_material_profile(name, profile) for name, profile in profiles_data.items()
@@ -428,6 +434,7 @@ def load_material_map(path: Path) -> MaterialMap:
         materials,
         components,
         parse_pcb_theme(pcb_data) if pcb_data is not None else None,
+        parse_solder_profiles(solder_data),
     )
 
 
