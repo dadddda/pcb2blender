@@ -24,7 +24,10 @@ class Pcb2BlenderExporter(pcbnew.ActionPlugin):
         dialog: SettingsDialog
         with SettingsDialog(None, boarddefs, ignored) as dialog:
             if dialog.ShowModal() == wx.OK:
-                export_pcb3d(dialog.file_picker.GetPath(), boarddefs)
+                try:
+                    export_pcb3d(dialog.file_picker.GetPath(), boarddefs)
+                except (OSError, RuntimeError) as error:
+                    wx.MessageBox(str(error), caption="Export failed", style=wx.ICON_ERROR | wx.OK)
 
 
 Pcb2BlenderExporter().register()

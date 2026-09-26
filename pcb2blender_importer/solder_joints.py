@@ -61,6 +61,18 @@ class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
     roundness: FloatProperty(
         name="Roundness", min=0.0, max=1.0, description="Roundness of the corners of the pad"
     )
+    component_pad_size: FloatVectorProperty(
+        name="Component-side Pad Size (mm)",
+        size=2,
+        default=(0.0, 0.0),
+        min=0.0,
+        description="THT component-side pad size; zero uses the solder-side geometry",
+    )
+    component_roundness: FloatProperty(
+        name="Component-side Roundness",
+        min=0.0,
+        max=1.0,
+    )
 
     hole_shape: EnumProperty(
         name="Hole Shape",
@@ -120,7 +132,24 @@ class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
                 pad_size += 0.03
 
         if self.pad_type == "THT":
-            verts, faces = solder_joint_tht(pad_size, hole_size, self.roundness, self.pcb_thickness)
+            component_size = np.array(self.component_pad_size)
+            if np.any(component_size > 0):
+                if np.any(component_size <= 0):
+                    self.report({"ERROR"}, "Both component-side pad dimensions must be positive")
+                    return {"CANCELLED"}
+                component_size += tht_pad_edge_expansion(component_size, hole_size) * 2.0
+                component_roundness = self.component_roundness
+            else:
+                component_size = pad_size
+                component_roundness = self.roundness
+            verts, faces = solder_joint_tht(
+                pad_size,
+                hole_size,
+                self.roundness,
+                self.pcb_thickness,
+                component_size,
+                component_roundness,
+            )
         elif self.pad_type == "SMD":
             profile = None
             if self.smd_height > 0:
@@ -221,6 +250,9 @@ class PCB2BLENDER_OT_solder_joint_add(bpy.types.Operator):
         layout.separator()
 
         if self.pad_type == "THT":
+            if any(self.component_pad_size):
+                layout.prop(self, "component_pad_size")
+                layout.prop(self, "component_roundness", slider=True)
             layout.prop(self, "hole_shape")
             layout.prop(self, "hole_size", index=0 if self.hole_shape == "CIRCULAR" else -1)
             layout.separator()
@@ -241,19 +273,26 @@ def solder_joint_tht(
     hole_size: NDArray[np.float64],
     roundness: float = 0.0,
     pcb_thickness: float = 1.6,
+    component_pad_size: NDArray[np.float64] | None = None,
+    component_roundness: float | None = None,
 ):
     vs = np.empty((0, 3), dtype=float)
     fs = np.empty((0, 4), dtype=int)
 
     is_slotted = not np.isclose(hole_size[0], hole_size[1])
-    joint_height, component_side_height, pin_size = tht_joint_dimensions(
-        pad_size, hole_size, roundness
+    joint_height, _, pin_size = tht_joint_dimensions(pad_size, hole_size, roundness)
+    if component_pad_size is None:
+        component_pad_size = pad_size
+    if component_roundness is None:
+        component_roundness = roundness
+    _, component_side_height, component_pin_size = tht_joint_dimensions(
+        component_pad_size, hole_size, component_roundness
     )
-    segments_per_corner = 8 if roundness >= 1.0 or is_slotted else 2
+    segments_per_corner = 8 if max(roundness, component_roundness) >= 1.0 or is_slotted else 2
 
     component_layers = meniscus_layers(
-        pin_size * 0.65,
-        pad_size,
+        component_pin_size * 0.65,
+        component_pad_size,
         -(pcb_thickness + component_side_height),
         -(pcb_thickness + 0.05),
         5,
@@ -261,10 +300,10 @@ def solder_joint_tht(
     solder_layers = meniscus_layers(pad_size, pin_size, 0.05, joint_height, 7)
     layers = (
         *(
-            (size, z, max(roundness, 0.4), index == 0)
+            (size, z, max(component_roundness, 0.4), index == 0)
             for index, (size, z) in enumerate(component_layers)
         ),
-        (pad_size, -(pcb_thickness - 0.03), max(roundness, 0.4), False),
+        (component_pad_size, -(pcb_thickness - 0.03), max(component_roundness, 0.4), False),
         (hole_size * 0.9, -0.30, 1.0, False),
         (pad_size, -0.10, max(roundness, 0.2), False),
         *(

@@ -189,6 +189,26 @@ def test_tht_joint_matches_pad_bounds_and_fillet_heights():
     assert joint_height <= THT_SLOT_JOINT_HEIGHT_MAX_MM
 
 
+@pytest.mark.parametrize("component_roundness", (0.0, 0.5, 1.0))
+def test_tht_joint_has_independent_component_side_geometry(component_roundness):
+    solder_size = np.array((3.0, 4.0))
+    component_size = np.array((2.0, 2.5))
+    hole_size = np.array((0.6, 1.0))
+    vertices, faces = solder_joint_tht(
+        solder_size, hole_size, 1.0, PCB_THICKNESS_MM,
+        component_size, component_roundness,
+    )
+    assert_valid_quad_mesh(vertices, faces)
+    solder = vertices[vertices[:, 2] > BOARD_SURFACE_Z_MM]
+    component = vertices[vertices[:, 2] < -BOARD_SURFACE_Z_MM]
+    np.testing.assert_allclose(np.ptp(solder[:, :2], axis=0), solder_size)
+    np.testing.assert_allclose(np.ptp(component[:, :2], axis=0), component_size)
+    height, _, _ = tht_joint_dimensions(solder_size, hole_size, 1.0)
+    _, component_height, _ = tht_joint_dimensions(component_size, hole_size, component_roundness)
+    assert vertices[:, 2].max() == pytest.approx(BOARD_SURFACE_Z_MM + height)
+    assert vertices[:, 2].min() == pytest.approx(-BOARD_SURFACE_Z_MM - component_height)
+
+
 def test_tht_joint_height_scales_with_annular_area():
     hole_size = np.array((1.0, 1.0))
     thin_height, _, _ = tht_joint_dimensions(np.array((1.4, 1.4)), hole_size, 1.0)

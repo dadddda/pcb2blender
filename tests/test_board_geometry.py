@@ -6,7 +6,7 @@ from bl_ext.user_default.pcb3d_importer.board_geometry import (
     hole_rim_loops,
     refine_board_holes,
 )
-from bl_ext.user_default.pcb3d_importer.pcb3d import DrillShape, Pad, PadShape, PadType
+from bl_ext.user_default.pcb3d_importer.pcb3d import DrillShape, Pad, PadGeometry, PadShape, PadType
 
 import bmesh
 import bpy
@@ -56,10 +56,9 @@ def make_drilled_board(size, angle, offset, pad_type=PadType.THT):
         is_tht_or_smd=True,
         has_paste=False,
         pad_type=pad_type,
-        shape=PadShape.OVAL,
-        size=(size[0] + 0.6, size[1] + 0.6),
+        front=PadGeometry(PadShape.OVAL, (size[0] + 0.6, size[1] + 0.6), 1.0),
+        back=PadGeometry(PadShape.OVAL, (size[0] + 0.6, size[1] + 0.6), 1.0),
         rotation=angle,
-        roundness=1.0,
         drill_shape=DrillShape.CIRCULAR if size[0] == size[1] else DrillShape.OVAL,
         drill_size=size,
     )

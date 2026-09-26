@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "pcb3d_importer"
-version = "2.18.0"
+version = "2.20.0"
 name = "PCB 3D Importer"
 tagline = "Import PCB 3D Models from KiCad"
 maintainer = "dadddda (fork), 30350n (upstream)"

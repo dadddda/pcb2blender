@@ -2,13 +2,12 @@ import io
 import random
 import re
 import shutil
-import struct
 import sys
 import tempfile
 from math import inf, radians
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast
-from zipfile import BadZipFile, Path as ZipPath, ZipFile
+from zipfile import BadZipFile, ZipFile
 
 from error_helper import error, warning
 from PIL import Image, ImageOps
@@ -320,19 +319,13 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
 
         try:
             with ZipFile(filepath) as file:
-                MEMBERS = {path.name for path in ZipPath(file).iterdir()}
-                if missing := PCB3D.REQUIRED_MEMBERS.difference(MEMBERS):
-                    return self.error(f"not a valid .pcb3d file: missing {str(missing)[1:-1]}")
-                result = PCB3D.from_file(
-                    file, tempdir, on_error=self.error, on_warning=self.warning
-                )
-                if not isinstance(result, PCB3D):
-                    return result
+                pcb = PCB3D.from_file(file, tempdir)
         except BadZipFile:
+            shutil.rmtree(tempdir)
             return self.error("not a valid .pcb3d file: not a zip file")
-        except (KeyError, struct.error) as e:
-            return self.error(f"pcb3d file is corrupted: {e}")
-        pcb = result
+        except (KeyError, TypeError, ValueError, OSError) as e:
+            shutil.rmtree(tempdir)
+            return self.error(f"Could not import .pcb3d: {e}")
 
         # import objects
 
@@ -607,42 +600,64 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
 
                 if pad.pad_type not in {PadType.THT, PadType.SMD}:
                     continue
-                if pad.shape == PadShape.UNKNOWN:
-                    continue
                 if pad.fab_type not in {PadFabType.NONE, PadFabType.BGA, PadFabType.CASTELLATED}:
                     continue
 
+                component_geometry = pad.back if pad.is_flipped else pad.front
+                geometry = (
+                    (pad.front if pad.is_flipped else pad.back)
+                    if pad.pad_type == PadType.THT else component_geometry
+                )
+                supported_shapes = {
+                    PadShape.RECT,
+                    PadShape.CIRCLE,
+                    PadShape.OVAL,
+                    PadShape.ROUNDRECT,
+                }
+                geometries = (
+                    (geometry, component_geometry) if pad.pad_type == PadType.THT else (geometry,)
+                )
+                if any(item.shape not in supported_shapes for item in geometries):
+                    print(f"skipping solder joint for '{pad_name}', unsupported pad shape")
+                    continue
+
                 pad_type = pad.pad_type.name
-                pad_size = pad.size
+                pad_size = geometry.size
                 hole_size = pad.drill_size
                 hole_shape = resolve_hole_shape(pad.drill_shape, hole_size)
                 pad_shape = "RECTANGULAR"
-                match pad.shape:
-                    case PadShape.RECT:
-                        roundness = 0.0
+                roundness = geometry.solder_roundness
+                match geometry.shape:
                     case PadShape.CIRCLE:
                         pad_shape = "CIRCULAR"
-                        roundness = 1.0
                     case PadShape.OVAL:
                         pad_shape = "OVAL"
-                        roundness = 1.0
-                    case PadShape.ROUNDRECT:
-                        roundness = pad.roundness * 2.0
-                    case PadShape.TRAPEZOID | PadShape.CHAMFERED_RECT | PadShape.CUSTOM:
-                        print(
-                            f"skipping solder joint for '{pad_name}', "
-                            f"unsupported shape '{pad.shape.name}'"
-                        )
-                        continue
+                component_size = (
+                    component_geometry.size if pad.pad_type == PadType.THT else (0.0, 0.0)
+                )
+                component_roundness = (
+                    component_geometry.solder_roundness if pad.pad_type == PadType.THT else 0.0
+                )
 
                 try:
                     solder_profile = (
                         match_solder_profile(self.material_map.solder, pad_name, pad_size)
-                        if pad.pad_type == PadType.SMD else None
+                        if pad.pad_type == PadType.SMD
+                        else None
                     )
                 except ValueError as error:
                     return self.error(str(error))
-                cache_id = (pad_type, pad_shape, pad_size, hole_shape, hole_size, roundness, solder_profile)
+                cache_id = (
+                    pad_type,
+                    pad_shape,
+                    pad_size,
+                    hole_shape,
+                    hole_size,
+                    roundness,
+                    component_size,
+                    component_roundness,
+                    solder_profile,
+                )
                 if not (solder_joint := solder_joint_cache.get(cache_id)):
                     try:
                         bpy.ops.pcb2blender.solder_joint_add(
@@ -653,6 +668,8 @@ class PCB2BLENDER_OT_import_pcb3d(ImportHelper, bpy.types.Operator):
                             hole_shape=hole_shape,
                             hole_size=hole_size,
                             pcb_thickness=pcb.stackup.thickness_mm,
+                            component_pad_size=component_size,
+                            component_roundness=component_roundness,
                             reuse_material=True,
                             smd_height=solder_profile.height if solder_profile else 0.0,
                             terminal_size=solder_profile.terminal_size if solder_profile else (0.0, 0.0),

@@ -15,6 +15,7 @@ from .pcb3d import (
     KiCadColor,
     Pad,
     PadFabType,
+    PadGeometry,
     PadShape,
     PadType,
     StackedBoard,
@@ -40,7 +41,8 @@ def export_pcb3d(filepath: Union[str, Path], boarddefs: dict[str, Board]):
 
     wrl_path = get_temppath(PCB3D.PCB)
     components_path = get_temppath(PCB3D.COMPONENTS)
-    pcbnew.ExportVRML(wrl_path, 0.001, True, False, True, True, components_path, 0.0, 0.0)
+    if not pcbnew.ExportVRML(wrl_path, 0.001, True, False, True, True, components_path, 0.0, 0.0):
+        raise RuntimeError("KiCad could not export the board's VRML model")
 
     layers_path = get_temppath(PCB3D.LAYERS)
     board: pcbnew.BOARD = pcbnew.GetBoard()
@@ -51,6 +53,20 @@ def export_pcb3d(filepath: Union[str, Path], boarddefs: dict[str, Board]):
     )
     export_layers(board, bounds, layers_path)
 
+    pcb = PCB3D(bounds, get_stackup(board), boarddefs, get_pads(board))
+    with ZipFile(filepath, mode="w", compression=ZIP_DEFLATED) as file:
+        pcb.write(file, wrl_path, components_path, layers_path)
+
+
+def get_pad_geometry(pad: pcbnew.PAD, layer: int) -> PadGeometry:
+    return PadGeometry(
+        PadShape(pad.GetShape(layer)),
+        ToMM2D(pad.GetSize(layer)),
+        pad.GetRoundRectRadiusRatio(layer),
+    )
+
+
+def get_pads(board: pcbnew.BOARD) -> dict[str, Pad]:
     pads = {}
     footprint: pcbnew.FOOTPRINT
     for i, footprint in enumerate(board.Footprints()):
@@ -68,6 +84,8 @@ def export_pcb3d(filepath: Union[str, Path], boarddefs: dict[str, Board]):
             drill_shape = (
                 DrillShape.CIRCULAR if drill_size[0] == drill_size[1] else DrillShape.OVAL
             )
+            front = get_pad_geometry(pad, pcbnew.F_Cu)
+            back = get_pad_geometry(pad, pcbnew.B_Cu)
             pads[name] = Pad(
                 ToMM2D(pad.GetPosition()),
                 is_flipped,
@@ -75,19 +93,14 @@ def export_pcb3d(filepath: Union[str, Path], boarddefs: dict[str, Board]):
                 is_tht_or_smd,
                 has_paste,
                 PadType(pad.GetAttribute()),
-                PadShape(pad.GetShape()),
-                ToMM2D(pad.GetSize()),
                 pad.GetOrientation().AsRadians(),
-                pad.GetRoundRectRadiusRatio(),
                 drill_shape,
                 drill_size,
+                front,
+                back,
                 PadFabType(pad.GetProperty()),
             )
-
-    with ZipFile(filepath, mode="w", compression=ZIP_DEFLATED) as file:
-        PCB3D(bounds, get_stackup(board), boarddefs, pads).write(
-            file, wrl_path, components_path, layers_path
-        )
+    return pads
 
 
 def get_boarddefs(board: pcbnew.BOARD):
@@ -160,7 +173,8 @@ def get_stackup(board: pcbnew.BOARD) -> Stackup:
     stackup = Stackup()
 
     tmp_path = get_temppath("pcb2blender_tmp.kicad_pcb")
-    pcbnew.SaveBoard(str(tmp_path), board, aSkipSettings=True)
+    if not pcbnew.SaveBoard(str(tmp_path), board, aSkipSettings=True):
+        raise RuntimeError("KiCad could not save the board for stackup extraction")
     content = tmp_path.read_text(encoding="utf-8")
 
     if not (match := STACKUP_REGEX.search(content)):
@@ -203,10 +217,14 @@ def export_layers(board: pcbnew.BOARD, bounds: Bounds, output_directory: Path):
 
     for layer in PCB3D.INCLUDED_LAYERS:
         plot_controller.SetLayer(getattr(pcbnew, layer))
-        plot_controller.OpenPlotfile(layer, pcbnew.PLOT_FORMAT_SVG, "")
-        plot_controller.PlotLayer()
-        filepath = Path(plot_controller.GetPlotFileName())
-        plot_controller.ClosePlot()
+        if not plot_controller.OpenPlotfile(layer, pcbnew.PLOT_FORMAT_SVG, ""):
+            raise RuntimeError(f"KiCad could not open the SVG plot for {layer}")
+        try:
+            if not plot_controller.PlotLayer():
+                raise RuntimeError(f"KiCad could not plot {layer}")
+            filepath = Path(plot_controller.GetPlotFileName())
+        finally:
+            plot_controller.ClosePlot()
         filepath = filepath.replace(filepath.parent / f"{layer}.svg")
 
         content = filepath.read_text(encoding="utf-8")

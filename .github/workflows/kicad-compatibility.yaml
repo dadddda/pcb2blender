@@ -1,0 +1,63 @@
+name: KiCad 10 compatibility
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  exporter:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install KiCad 10 and test dependencies
+        run: |
+          sudo add-apt-repository --yes ppa:kicad/kicad-10.0-releases
+          sudo apt-get update
+          sudo apt-get install --yes kicad kicad-packages3d python3-pytest python3-requests xvfb
+          /usr/bin/python3 -c 'import pcbnew; assert pcbnew.GetBuildVersion().startswith("10.0.")'
+      - name: Test exporter and package
+        env:
+          PCB2BLENDER_TEST_PCB3D: ${{ runner.temp }}/kicad10.pcb3d
+        run: xvfb-run -a /usr/bin/python3 -m pytest -v tests/test_pcb3d.py tests/kicad tests/packaging
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kicad10-roundtrip
+          path: ${{ runner.temp }}/kicad10.pcb3d
+          if-no-files-found: error
+  importer:
+    needs: exporter
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+      - name: Prepare Blender 5.1
+        run: |
+          uv sync --only-group ci
+          uv run --only-group ci python download_dependencies.py
+          sudo apt-get update
+          sudo apt-get install --yes libegl1
+          uv run --only-group ci python .github/workflows/download_blender.py 5.1
+          ./blender/5.1/python/bin/python3.13 -m ensurepip
+          ./blender/5.1/python/bin/python3.13 -m pip install pytest
+          ./blender/blender --command extension build --source-dir pcb2blender_importer --output-filepath importer.zip
+          ./blender/blender --command extension install-file importer.zip -r user_default -e
+      - uses: actions/download-artifact@v4
+        with:
+          name: kicad10-roundtrip
+          path: ${{ runner.temp }}
+      - name: Test KiCad archive in Blender
+        env:
+          PCB2BLENDER_TEST_PCB3D: ${{ runner.temp }}/kicad10.pcb3d
+        run: |
+          uv run --only-group ci pytest --blender-executable ./blender/blender -v \
+            tests/test_importer.py tests/test_solder_joints.py tests/test_solder_profiles.py \
+            tests/test_board_geometry.py -- --threads 1

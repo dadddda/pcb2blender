@@ -1,8 +1,8 @@
 # pcb2blender
 
-[![version](https://img.shields.io/badge/version-2.18.0-blue)](https://github.com/dadddda/pcb2blender)
+[![version](https://img.shields.io/badge/version-2.20.0-blue)](https://github.com/dadddda/pcb2blender)
 [![blender](https://img.shields.io/badge/Blender-5.1-orange)](https://www.blender.org/)
-[![kicad](https://img.shields.io/badge/KiCad-9.0-blue)](https://www.kicad.org/)
+[![kicad](https://img.shields.io/badge/KiCad-10.0-blue)](https://www.kicad.org/)
 [![license](https://img.shields.io/badge/License-GPLv3-lightgrey)](LICENSE)
 
 <img src="images/header.jpg" alt="Rendered PCB"/>
@@ -17,6 +17,7 @@ This fork builds on [30350n/pcb2blender](https://github.com/30350n/pcb2blender) 
 - Adaptive THT profiles and raised SMD solder beads.
 - Optional TOML solder overrides for selected SMD components.
 - Compatibility with current KiCad drill-shape metadata.
+- Independent front/back pad geometry for asymmetric padstacks, and press-fit pad detection.
 
 <img src="images/e201_soldered.jpg" alt="Rendered solder joints"/>
 
@@ -28,7 +29,9 @@ This fork builds on [30350n/pcb2blender](https://github.com/30350n/pcb2blender) 
 
 ## Installation
 
-The importer requires Blender 5.1 and the exporter targets KiCad 9.0.
+The importer requires Blender 5.1. The exporter supports **KiCad 10.0 only**, tested with
+**10.0.6**; KiCad 9 is not supported. Install the current exporter and importer together.
+Unversioned `.pcb3d` archives from earlier exporters must be re-exported.
 
 ### Blender importer
 
@@ -60,10 +63,25 @@ uv run python .github/workflows/build_kicad_addon.py `
     --extra-files images/blender_icon_32x32.png
 ```
 
-Install `dist/pcb2blender_exporter_v2-18-0_k9-0.zip` through
+Install `dist/pcb2blender_exporter_v2-20-0_k10-0.zip` through
 **Plugin and Content Manager > Install from File**. For a manual installation, place the contents
 of `pcb2blender_exporter` in the
 [KiCad plugin directory](https://dev-docs.kicad.org/en/apis-and-binding/pcbnew/).
+
+The exporter still uses KiCad's legacy SWIG action-plugin interface, which is available in
+KiCad 10. No IPC configuration is needed. KiCad 10's STEP-only component libraries are
+converted to WRL during export; the Blender importer does not need a STEP reader.
+
+### Archive format
+
+Only `.pcb3d` **format version 1** is supported. Archives contain a root `format.toml`
+with `version = 1`, TOML metadata, and mandatory `front` and `back` geometry for every pad.
+This format version is independent of the add-on version.
+
+Unversioned archives, legacy binary metadata, and unsupported format versions are rejected
+with a re-export message. Re-export the original board from KiCad 10 using the current
+exporter; there is no legacy import or conversion mode. Previously exported files that
+already use the supported format remain usable.
 
 ## Material themes
 
@@ -187,6 +205,12 @@ Generated solder joints use a bounded geometry heuristic rather than one fixed p
 - SMD bead height and edge spread scale with pad area and minimum pad width.
 - SMD beads have a rounded dome that follows the pad at the base and narrows to a smooth crown.
 - THT joints use smoothstep-interpolated layers to approximate a surface-tension meniscus.
+- KiCad 10 exports store front/back pad shape, size, and roundness independently. THT joints
+  use each side's geometry, including on flipped footprints; SMD joints use their mounting side.
+- Press-fit pads do not generate solder joints, including with the **All** solder option.
+
+Per-side solder geometry supports circular, rectangular, oval, and rounded-rectangle pads.
+Trapezoidal, chamfered, and custom pad shapes still skip solder generation.
 
 The `.pcb3d` format does not include exact terminal dimensions or paste volume, so this remains a
 visual approximation based on the available pad, hole, shape, and PCB-thickness metadata.
@@ -223,8 +247,36 @@ git submodule update --init --recursive
 uv sync
 uv run pytest `
     --blender-executable "C:\Program Files\Blender Foundation\Blender 5.1\blender.exe" `
-    -v tests/
+    -v tests/ -- --threads 1
 ```
+
+### KiCad exporter tests
+
+Run the exporter tests with KiCad's Python, not the Blender/project interpreter. The tests
+require `pytest`, KiCad 10's 3D model library, and `kicad-cli` (beside Python on Windows or on
+`PATH`). Set `KICAD10_3DMODEL_DIR` if the model library is installed in a nonstandard location.
+
+```powershell
+$KiCadPython = "C:\Program Files\KiCad\10.0\bin\python.exe"
+# Install pytest into this interpreter or add an isolated pytest installation to its sys.path.
+& $KiCadPython -m pytest -v .\tests\kicad
+
+# Run packaging tests without starting Blender.
+uv run pytest -p no:pytest-blender -v .\tests\test_pcb3d.py .\tests\packaging
+```
+
+To test a generated KiCad archive in Blender, set `PCB2BLENDER_TEST_PCB3D` to an absolute
+output filename before running the exporter tests, then run the Blender test suite with
+the same variable set. Without it, only the generated-archive round-trip test is skipped.
+The exporter tests exercise KiCad's real VRML exporter through `kicad-cli`, replacing only
+the GUI-bound `GetBoard`/`ExportVRML` entry points; they do not automate the export dialog.
+
+[KiCad compatibility CI](.github/workflows/kicad-compatibility.yaml) runs exporter/package
+tests on KiCad 10, passes the generated archive to Blender 5.1, and checks geometry and
+import regressions. Release builds require these checks to pass.
+
+The checked-in PCB fixtures use format version 1. Their metadata was migrated while retaining
+the original WRL models, SVG layers, stackup values, and effective pad geometry.
 
 The original repository is retained as the `upstream` Git remote. To incorporate upstream changes:
 

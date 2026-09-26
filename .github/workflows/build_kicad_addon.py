@@ -42,7 +42,7 @@ def build_kicad_addon(
     if package_only:
         return zip_file_path
 
-    hash_file_path = Path(f"{zip_file_path.name}.sha256")
+    hash_file_path = zip_file_path.with_suffix(".zip.sha256")
     with open(zip_file_path, "rb") as file:
         zip_file_hash = sha256(file.read()).hexdigest()
         hash_file_path.write_text(zip_file_hash)
@@ -52,12 +52,10 @@ def build_kicad_addon(
     version_metadata: dict[str, Any] = metadata["versions"][0].copy()
     version_metadata["download_sha256"] = zip_file_hash
     repo_url = get_repo_url(path)
-    download_url = f"{repo_url}/releases/download/{release_tag}/{zip_file_path}"
+    download_url = f"{repo_url}/releases/download/{release_tag}/{zip_file_path.name}"
     version_metadata["download_url"] = download_url
     with ZipFile(zip_file_path, mode="r") as zip_file:
-        version_metadata["download_size"] = sum(
-            (info.compress_size for info in zip_file.infolist())
-        )
+        version_metadata["download_size"] = zip_file_path.stat().st_size
         version_metadata["install_size"] = sum((info.file_size for info in zip_file.infolist()))
 
     content_library_metadata["versions"] = [version_metadata]
@@ -114,6 +112,7 @@ if __name__ == "__main__":
     parser.add_argument("release_tag", nargs="?", default="")
     parser.add_argument("--source", default="", help="addon source directory")
     parser.add_argument("--out", default="", help="output directory")
+    parser.add_argument("--output-path-file", type=Path, help="write the built ZIP path to this file")
     parser.add_argument("--icon", default="", help="path to addon icon (relative to SOURCE)")
     parser.add_argument(
         "--extra-files",
@@ -131,11 +130,13 @@ if __name__ == "__main__":
     if not args.package_only and not args.release_tag:
         parser.error("release_tag is required unless --package-only is used")
 
-    build_kicad_addon(
+    package_path = build_kicad_addon(
         args.release_tag,
         Path(args.source),
         Path(args.out),
-        Path(args.icon),
+        Path(args.icon) if args.icon else None,
         [Path(extra_file) for extra_file in args.extra_files],
         args.package_only,
     )
+    if args.output_path_file:
+        args.output_path_file.write_text(str(package_path), encoding="utf-8")

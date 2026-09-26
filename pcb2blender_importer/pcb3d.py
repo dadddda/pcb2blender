@@ -1,10 +1,9 @@
 import re
-import struct
 from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 from types import GenericAlias
-from typing import Any, Callable
+from typing import Any
 from zipfile import Path as ZipPath, ZipFile
 
 if "bpy" in locals():
@@ -17,18 +16,20 @@ else:
 class TOMLSerializable:
     @classmethod
     def from_toml(cls, data: str):
-        toml = load_toml(data)
+        return cls.from_dict(load_toml(data))
+
+    @classmethod
+    def from_dict(cls, toml: dict[str, Any]):
         values = {}
         for f in fields(cls):
             value = toml[f.name]
-            if isinstance(f.type, type) and issubclass(f.type, Enum):
-                if value in f.type._member_names_:
-                    values[f.name] = f.type[value]
-                elif -1 in f.type._value2member_map_:
-                    f.type._missing_(value)
-                    values[f.name] = f.type(-1)
-            elif isinstance(f.type, (type, GenericAlias)):
-                values[f.name] = f.type(value)  # pyright: ignore[reportCallIssue]
+            value_type = f.type
+            if isinstance(value_type, type) and issubclass(value_type, Enum):
+                values[f.name] = value_type[value]
+            elif isinstance(value_type, type) and issubclass(value_type, TOMLSerializable):
+                values[f.name] = value_type.from_dict(value)
+            elif isinstance(value_type, (type, GenericAlias)):
+                values[f.name] = value_type(value)  # pyright: ignore[reportCallIssue]
             else:
                 values[f.name] = value
         return cls(**values)
@@ -42,7 +43,12 @@ class TOMLSerializable:
 
     @classmethod
     def _toml_value(cls, value: Any) -> str:
-        if isinstance(value, (tuple, list)):
+        if isinstance(value, TOMLSerializable):
+            entries = (
+                f"{f.name} = {cls._toml_value(getattr(value, f.name))}" for f in fields(value)
+            )
+            return "{ " + ", ".join(entries) + " }"
+        elif isinstance(value, (tuple, list)):
             return f"[ {', '.join(cls._toml_value(subvalue) for subvalue in value)} ]"
         elif isinstance(value, Enum):
             return f'"{value.name}"'
@@ -102,11 +108,25 @@ class PadFabType(Enum):
     HEATSINK = 5
     CASTELLATED = 6
     MECHANICAL = 7
+    PRESSFIT = 8
 
     @classmethod
     def _missing_(cls, value: Any):
         warning(f"unknown pad fabrication attribute '{value}'")
         return cls.NONE
+
+
+@dataclass
+class PadGeometry(TOMLSerializable):
+    shape: PadShape
+    size: tuple[float, float]
+    roundness: float
+
+    @property
+    def solder_roundness(self) -> float:
+        if self.shape in {PadShape.CIRCLE, PadShape.OVAL}:
+            return 1.0
+        return self.roundness * 2.0 if self.shape == PadShape.ROUNDRECT else 0.0
 
 
 @dataclass
@@ -117,38 +137,12 @@ class Pad(TOMLSerializable):
     is_tht_or_smd: bool
     has_paste: bool
     pad_type: PadType
-    shape: PadShape
-    size: tuple[float, float]
     rotation: float
-    roundness: float
     drill_shape: DrillShape
     drill_size: tuple[float, float]
+    front: PadGeometry
+    back: PadGeometry
     fab_type: PadFabType = PadFabType.NONE
-
-    FORMAT = "!ff????BBffffBff"
-    FORMAT_SIZE = struct.calcsize(FORMAT)
-
-    @classmethod
-    def from_bytes(cls, data: bytes):
-        if len(data) != cls.FORMAT_SIZE:
-            data = data[: cls.FORMAT_SIZE].ljust(cls.FORMAT_SIZE, b"\x00")
-            warning(f"unexpected pad data size '{len(data)}' (expected {cls.FORMAT_SIZE})")
-
-        unpacked = struct.unpack(cls.FORMAT, data)
-        return Pad(
-            (unpacked[0], unpacked[1]),
-            unpacked[2],
-            unpacked[3],
-            unpacked[4],
-            unpacked[5],
-            PadType(unpacked[6]),
-            PadShape(unpacked[7]),
-            (unpacked[8], unpacked[9]),
-            unpacked[10],
-            unpacked[11],
-            DrillShape(unpacked[12]),
-            (unpacked[13], unpacked[14]),
-        )
 
 
 class KiCadColor(Enum):
@@ -177,37 +171,11 @@ class Stackup(TOMLSerializable):
     silks_color_custom: tuple[float, ...] = (0.0, 0.0, 0.0)
     surface_finish: SurfaceFinish = SurfaceFinish.HASL
 
-    OLD_FORMAT = "!fbBBBbBBBb"
-    OLD_FORMAT_SIZE = struct.calcsize(OLD_FORMAT)
-
-    @classmethod
-    def from_bytes(cls, data: bytes):
-        if len(data) != cls.OLD_FORMAT_SIZE:
-            data = data[: cls.OLD_FORMAT_SIZE].ljust(cls.OLD_FORMAT_SIZE, b"\x00")
-            warning(f"unexpected stackup data size '{len(data)}' (expected {cls.OLD_FORMAT_SIZE})")
-
-        unpacked = struct.unpack(cls.OLD_FORMAT, data)
-        return Stackup(
-            unpacked[0],
-            KiCadColor(unpacked[1]),
-            (unpacked[2] / 255, unpacked[3] / 255, unpacked[4] / 255),
-            KiCadColor(unpacked[5]),
-            (unpacked[6] / 255, unpacked[7] / 255, unpacked[8] / 255),
-            SurfaceFinish(unpacked[9]),
-        )
-
 
 @dataclass
 class Bounds(TOMLSerializable):
     top_left: tuple[float, float]
     size: tuple[float, float]
-
-    OLD_FORMAT = "!ffff"
-
-    @classmethod
-    def from_bytes(cls, data: bytes):
-        unpacked = struct.unpack(cls.OLD_FORMAT, data)
-        return Bounds(unpacked[0:2], unpacked[2:4])
 
     @property
     def bottom_right(self):
@@ -219,18 +187,12 @@ class Bounds(TOMLSerializable):
 
 
 class StackedBoard(tuple[float, float, float]):
-    OLD_FORMAT = "!fff"
-
     @classmethod
     def from_toml(cls, data: str):
         return StackedBoard(load_toml(data)["offset"])
 
     def to_toml(self):
         return f"offset = [ {self[0]}, {self[1]}, {self[2]} ]"
-
-    @classmethod
-    def from_bytes(cls, data: bytes):
-        return StackedBoard(struct.unpack(cls.OLD_FORMAT, data))
 
 
 @dataclass
@@ -248,17 +210,44 @@ class PCB3D:
     content: str = ""
 
     @classmethod
-    def from_file(
-        cls,
-        file: ZipFile,
-        extract_dir: Path,
-        on_error: Callable[[str], Any] = print,
-        on_warning: Callable[[str], None] = print,
-    ):
+    def from_file(cls, file: ZipFile, extract_dir: Path):
+        reexport = "Re-export the board using the current pcb2blender exporter."
+        if cls.FORMAT not in file.namelist():
+            raise ValueError(f"Unsupported unversioned .pcb3d archive. {reexport}")
+        try:
+            version = load_toml(file.read(cls.FORMAT).decode("utf-8"))["version"]
+        except (KeyError, ValueError) as error:
+            raise ValueError(f"Invalid .pcb3d format metadata. {reexport}") from error
+        if type(version) is not int or version != cls.FORMAT_VERSION:
+            raise ValueError(f"Unsupported .pcb3d format version {version!r}. {reexport}")
+
         members = {path.name for path in ZipPath(file).iterdir()}
         if missing := cls.REQUIRED_MEMBERS.difference(members):
-            return on_error(f"not a valid .pcb3d file: missing {str(missing)[1:-1]}")
+            raise ValueError(f"not a valid .pcb3d file: missing {str(missing)[1:-1]}")
         zip_path = ZipPath(file)
+
+        layers_bounds = Bounds.from_toml(
+            file.read(f"{cls.LAYERS}/{cls.LAYERS_BOUNDS}").decode("utf-8")
+        )
+        stackup = Stackup.from_toml(file.read(f"{cls.LAYERS}/{cls.LAYERS_STACKUP}").decode("utf-8"))
+        boards = {}
+        for board_dir in (zip_path / cls.BOARDS).iterdir():
+            bounds = Bounds.from_toml((board_dir / cls.BOUNDS).read_text(encoding="utf-8"))
+            stacked_boards = {}
+            for path in board_dir.iterdir():
+                if not path.name.startswith(cls.STACKED):
+                    continue
+                if path.suffix != ".toml":
+                    raise ValueError(f"Unsupported stacked-board metadata: {path.name}. {reexport}")
+                stacked_boards[path.stem[len(cls.STACKED) :]] = StackedBoard.from_toml(
+                    path.read_text(encoding="utf-8")
+                )
+            boards[board_dir.name] = Board(bounds, stacked_boards)
+        pads = {}
+        for path in (zip_path / cls.PADS).iterdir():
+            if path.suffix != ".toml":
+                raise ValueError(f"Unsupported pad metadata: {path.name}. {reexport}")
+            pads[path.stem] = Pad.from_toml(path.read_text(encoding="utf-8"))
 
         with file.open(cls.PCB) as pcb_file:
             pcb_file_content = pcb_file.read().decode("utf-8")
@@ -277,80 +266,14 @@ class PCB3D:
         layers = (f"{cls.LAYERS}/{layer}.svg" for layer in cls.INCLUDED_LAYERS)
         file.extractall(extract_dir, layers)
 
-        if (layers_bounds_path := zip_path / cls.LAYERS / cls.LAYERS_BOUNDS).exists():
-            layers_bounds = Bounds.from_toml(layers_bounds_path.read_text())
-        else:
-            old_layers_bounds_path = zip_path / cls.LAYERS / cls.LAYERS_BOUNDS[:-5]
-            layers_bounds = Bounds.from_bytes(old_layers_bounds_path.read_bytes())
-
-        if (layers_stackup_path := zip_path / cls.LAYERS / cls.LAYERS_STACKUP).exists():
-            stackup = Stackup.from_toml(layers_stackup_path.read_text())
-        elif (old_layers_stackup_path := zip_path / cls.LAYERS / cls.LAYERS_STACKUP[:-5]).exists():
-            stackup = Stackup.from_bytes(old_layers_stackup_path.read_bytes())
-        else:
-            stackup = Stackup()
-            on_warning("old file format: cls file doesn't contain stackup")
-
-        boards = {}
-        if not (boards_path := (zip_path / cls.BOARDS)).exists():
-            on_warning(f'old file format: cls file doesn\'t contain "{cls.BOARDS}" dir')
-        else:
-            for board_dir in boards_path.iterdir():
-                try:
-                    if (bounds_path := board_dir / cls.BOUNDS).exists():
-                        bounds = Bounds.from_toml(bounds_path.read_text())
-                    elif (old_bounds_path := board_dir / cls.BOUNDS[:-5]).exists():
-                        bounds = Bounds.from_bytes(old_bounds_path.read_bytes())
-                    else:
-                        continue
-                except (struct.error, ValueError):
-                    on_warning(f'ignoring board "{board_dir}" (corrupted)')
-                    continue
-
-                stacked_boards: dict[str, StackedBoard] = {}
-                for path in board_dir.iterdir():
-                    if not path.name.startswith(cls.STACKED):
-                        continue
-
-                    try:
-                        if path.suffix == ".toml":
-                            stacked_board = StackedBoard.from_toml(path.read_text())
-                        elif path.suffix == "":
-                            stacked_board = StackedBoard.from_bytes(path.read_bytes())
-                        else:
-                            continue
-                    except (struct.error, ValueError):
-                        on_warning("ignoring stacked board (corrupted)")
-                        continue
-
-                    stacked_board_name = path.stem.split(cls.STACKED, 1)[-1]
-                    stacked_boards[stacked_board_name] = stacked_board
-
-                boards[board_dir.name] = Board(bounds, stacked_boards)
-
-        pads = {}
-        if not (pads_path := (zip_path / cls.PADS)).exists():
-            on_warning(f'old file format: cls file doesn\'t contain "{cls.PADS}" dir')
-        else:
-            for path in pads_path.iterdir():
-                try:
-                    if path.suffix == ".toml":
-                        pads[path.stem] = Pad.from_toml(path.read_text())
-                    elif path.suffix == "":
-                        pads[path.stem] = Pad.from_bytes(path.read_bytes())
-                    else:
-                        continue
-                except struct.error:
-                    on_warning("old file format: failed to parse pads")
-                    break
-
         return PCB3D(layers_bounds, stackup, boards, pads, pcb_file_content)
 
     def write(self, file: ZipFile, wrl_file: Path, components_dir: Path, layers_dir: Path):
-        # always ensure the COMPONENTS, LAYERS and BOARDS directories are created
+        file.writestr(self.FORMAT, f"version = {self.FORMAT_VERSION}\n")
         file.writestr(f"{self.COMPONENTS}/", "")
         file.writestr(f"{self.LAYERS}/", "")
         file.writestr(f"{self.BOARDS}/", "")
+        file.writestr(f"{self.PADS}/", "")
 
         file.write(wrl_file, self.PCB)
         for path in components_dir.glob("**/*.wrl"):
@@ -371,6 +294,8 @@ class PCB3D:
         for pad_name, pad in self.pads.items():
             file.writestr(f"{self.PADS}/{pad_name}.toml", pad.to_toml())
 
+    FORMAT = "format.toml"
+    FORMAT_VERSION = 1
     PCB = "pcb.wrl"
     COMPONENTS = "components"
     LAYERS = "layers"
@@ -381,7 +306,7 @@ class PCB3D:
     STACKED = "stacked_"
     PADS = "pads"
 
-    REQUIRED_MEMBERS = {PCB, LAYERS}
+    REQUIRED_MEMBERS = {FORMAT, PCB, LAYERS, BOARDS, PADS}
 
     _INCLUDED_LAYERS = ["Cu", "Paste", "SilkS", "Mask"]
     INCLUDED_LAYERS_FRONT = [f"F_{layer}" for layer in _INCLUDED_LAYERS]

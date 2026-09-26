@@ -121,7 +121,7 @@ wheels = [
 
 [[package]]
 name = "pcb2blender"
-version = "2.18.0"
+version = "2.20.0"
 source = { virtual = "." }
 dependencies = [
     { name = "error-helper" },
